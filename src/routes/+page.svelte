@@ -389,8 +389,10 @@
       }
       const x = x0 < x1 ? x0 : x0 - w;
       const y = y0 < y1 ? y0 : y0 - h;
-      if (w >= 2 && h >= 2)
+      if (w >= 2 && h >= 2) {
         shapes = [...shapes, { type: "rectangle", points: [x, y, w, h], effect: selectedEffect }];
+        selectedShapeIndex = shapes.length - 1;
+      }
     } else if (tool === "ellipse" || tool === "circle") {
       let w = Math.abs(x1 - x0);
       let h = Math.abs(y1 - y0);
@@ -401,10 +403,13 @@
       }
       const x = x0 < x1 ? x0 : x0 - w;
       const y = y0 < y1 ? y0 : y0 - h;
-      if (w >= 2 && h >= 2)
+      if (w >= 2 && h >= 2) {
         shapes = [...shapes, { type: "ellipse", points: [x, y, w, h], effect: selectedEffect }];
+        selectedShapeIndex = shapes.length - 1;
+      }
     } else if (tool === "freehand" && freehandPoints.length >= 4) {
       shapes = [...shapes, { type: "freehand", points: [...freehandPoints], effect: selectedEffect }];
+      selectedShapeIndex = shapes.length - 1;
     }
     isDrawing = false;
     drawStart = null;
@@ -468,6 +473,7 @@
   function setSelectedShapeEffect(effect: EffectType) {
     if (selectedShapeIndex === null) return;
     shapes = shapes.map((s, i) => (i === selectedShapeIndex ? { ...s, effect } : s));
+    selectedEffect = effect;
   }
 
   function setSelectedShapeStrength(value: number) {
@@ -480,6 +486,9 @@
       if (effect === "blur") return { ...s, blurRadius: value };
       return { ...s, fillOpacity: value };
     });
+    if (effect === "pixelate") effectOptions = { ...effectOptions, pixelSize: value };
+    else if (effect === "blur") effectOptions = { ...effectOptions, blurRadius: value };
+    else effectOptions = { ...effectOptions, fillOpacity: value };
   }
 
   $effect(() => {
