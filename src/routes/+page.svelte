@@ -1,5 +1,6 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
+  import { listen } from "@tauri-apps/api/event";
   import type { Shape, ShapeType, EffectType, EffectOptions } from "$lib/types/redactor";
   import {
     redrawCanvas,
@@ -22,6 +23,14 @@
   let canvasWrapEl = $state<HTMLDivElement | null>(null);
   let imageSource = $state<string | null>(null);
   let imageDimensions = $state<{ width: number; height: number } | null>(null);
+  /** Full path when opened via dialog; null when pasted or dropped. */
+  let sourceFilePath = $state<string | null>(null);
+  /** Filename for save dialog default (e.g. "photo.jpg" or "pasted.png"). */
+  let sourceFileName = $state<string>("redacted.png");
+  /** Path we last saved to; when set, Save writes here without dialog. Cleared when opening a new image. */
+  let lastSavedPath = $state<string | null>(null);
+  /** Brief "Saved to …" message shown after a save. */
+  let savedToast = $state<string | null>(null);
   let shapes = $state<Shape[]>([]);
   let tool = $state<ShapeType>("rectangle");
   let selectedEffect = $state<EffectType>("pixelate");
@@ -39,6 +48,27 @@
   let openError = $state<string | null>(null);
   let copyError = $state<string | null>(null);
   let shareError = $state<string | null>(null);
+
+  const COMPATIBLE_IMAGE_TYPES = [
+    "image/png",
+    "image/jpeg",
+    "image/jpg",
+    "image/gif",
+    "image/webp",
+    "image/bmp",
+  ];
+
+  function isCompatibleImageType(type: string): boolean {
+    return COMPATIBLE_IMAGE_TYPES.some((t) => type === t || type.startsWith("image/"));
+  }
+
+  /** Default save filename: stem of sourceFileName + "-redacted.png". */
+  function getDefaultSaveName(): string {
+    if (!sourceFileName || sourceFileName === "redacted.png") return "redacted.png";
+    const lastDot = sourceFileName.lastIndexOf(".");
+    const stem = lastDot > 0 ? sourceFileName.slice(0, lastDot) : sourceFileName;
+    return `${stem}-redacted.png`;
+  }
 
   let selectedShapeIndex = $state<number | null>(null);
   let hoveredShapeIndex = $state<number | null>(null);
@@ -62,9 +92,12 @@
   async function openImage() {
     openError = null;
     try {
-      const result = await invoke<string | null>("open_image_dialog");
+      const result = await invoke<{ path: string; base64: string } | null>("open_image_dialog");
       if (result) {
-        imageSource = `data:image/png;base64,${result}`;
+        imageSource = `data:image/png;base64,${result.base64}`;
+        sourceFilePath = result.path;
+        sourceFileName = result.path.split(/[/\\]/).pop() ?? "image.png";
+        lastSavedPath = null;
         shapes = [];
         selectedShapeIndex = null;
         hoveredShapeIndex = null;
@@ -73,6 +106,38 @@
     } catch (e) {
       openError = e instanceof Error ? e.message : String(e);
     }
+  }
+
+  async function loadImageFromBytes(base64Any: string, fileName: string) {
+    openError = null;
+    try {
+      const pngBase64 = await invoke<string>("any_image_to_png_base64", {
+        base64Any,
+      });
+      imageSource = `data:image/png;base64,${pngBase64}`;
+      sourceFilePath = null;
+      sourceFileName = fileName;
+      lastSavedPath = null;
+      shapes = [];
+      selectedShapeIndex = null;
+      hoveredShapeIndex = null;
+      dragState = null;
+    } catch (e) {
+      openError = e instanceof Error ? e.message : String(e);
+    }
+  }
+
+  function fileToBase64(file: File): Promise<string> {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => {
+        const result = reader.result;
+        if (typeof result !== "string") reject(new Error("Expected string"));
+        else resolve(result.replace(/^data:[^;]+;base64,/, ""));
+      };
+      reader.onerror = () => reject(reader.error);
+      reader.readAsDataURL(file);
+    });
   }
 
   function updateOverlayRect() {
@@ -132,6 +197,15 @@
     return dataUrl.replace(/^data:image\/png;base64,/, "");
   }
 
+  function showSavedToast(path: string) {
+    const name = path.split(/[/\\]/).pop() ?? path;
+    savedToast = `Saved to ${name}`;
+    const t = setTimeout(() => {
+      savedToast = null;
+    }, 3000);
+    return () => clearTimeout(t);
+  }
+
   async function saveImage() {
     saveError = null;
     const base64 = getExportBase64();
@@ -140,7 +214,37 @@
       return;
     }
     try {
-      await invoke("save_image", { base64Png: base64 });
+      const path = await invoke<string | null>("save_image", {
+        base64Png: base64,
+        overwritePath: lastSavedPath,
+        defaultName: getDefaultSaveName(),
+      });
+      if (path) {
+        lastSavedPath = path;
+        showSavedToast(path);
+      }
+    } catch (e) {
+      saveError = e instanceof Error ? e.message : String(e);
+    }
+  }
+
+  async function saveImageAs() {
+    saveError = null;
+    const base64 = getExportBase64();
+    if (!base64) {
+      saveError = "No image to save";
+      return;
+    }
+    try {
+      const path = await invoke<string | null>("save_image", {
+        base64Png: base64,
+        overwritePath: null,
+        defaultName: getDefaultSaveName(),
+      });
+      if (path) {
+        lastSavedPath = path;
+        showSavedToast(path);
+      }
     } catch (e) {
       saveError = e instanceof Error ? e.message : String(e);
     }
@@ -175,6 +279,34 @@
       shareError = e instanceof Error ? e.message : String(e);
     }
   }
+
+  $effect(() => {
+    let unlisten: (() => void) | undefined;
+    listen<string>("menu-action", (event) => {
+      switch (event.payload) {
+        case "open":
+          openImage();
+          break;
+        case "save":
+          saveImage();
+          break;
+        case "saveAs":
+          saveImageAs();
+          break;
+        case "copy":
+          copyImage();
+          break;
+        case "share":
+          shareImage();
+          break;
+      }
+    }).then((fn) => {
+      unlisten = fn;
+    });
+    return () => {
+      unlisten?.();
+    };
+  });
 
   function getCanvasPoint(e: MouseEvent | PointerEvent): { x: number; y: number } | null {
     const canvas = canvasEl;
@@ -523,7 +655,10 @@
       openImage();
     } else if (e.key === "s") {
       e.preventDefault();
-      if (imageSource) saveImage();
+      if (imageSource) {
+        if (e.shiftKey) saveImageAs();
+        else saveImage();
+      }
     }
   }
 
@@ -552,34 +687,59 @@
       document.removeEventListener("pointercancel", handlePointerUp);
     };
   });
+
+  function onDragOver(e: DragEvent) {
+    const hasImage = Array.from(e.dataTransfer?.items ?? []).some(
+      (item) => item.kind === "file" && isCompatibleImageType(item.type)
+    );
+    if (hasImage) {
+      e.preventDefault();
+      e.dataTransfer!.dropEffect = "copy";
+    }
+  }
+
+  async function onDrop(e: DragEvent) {
+    const file = e.dataTransfer?.files?.[0];
+    if (!file || !isCompatibleImageType(file.type)) return;
+    e.preventDefault();
+    try {
+      const base64 = await fileToBase64(file);
+      await loadImageFromBytes(base64, file.name);
+    } catch (_) {
+      openError = "Failed to load dropped image";
+    }
+  }
+
+  async function onPaste(e: ClipboardEvent) {
+    const item = Array.from(e.clipboardData?.items ?? []).find(
+      (i) => i.type.startsWith("image/")
+    );
+    const file = item?.getAsFile();
+    if (!file) return;
+    e.preventDefault();
+    try {
+      const base64 = await fileToBase64(file);
+      await loadImageFromBytes(base64, "pasted.png");
+    } catch (_) {
+      openError = "Failed to load pasted image";
+    }
+  }
+
+  $effect(() => {
+    if (typeof document === "undefined") return;
+    document.addEventListener("paste", onPaste);
+    return () => document.removeEventListener("paste", onPaste);
+  });
 </script>
 
-<main class="app">
+<main
+  class="app"
+  ondragover={onDragOver}
+  ondrop={onDrop}
+  role="application"
+  aria-label="Redactorizer app; drop an image or paste to open"
+>
   <Toolbar>
-    <ToolbarGroup>
-      <Button title="Open image (⌘O)" onclick={openImage}>Open</Button>
-      <Button
-        title="Save (⌘S)"
-        disabled={!imageSource}
-        onclick={saveImage}
-      >
-        Save
-      </Button>
-      <Button
-        title="Copy image to clipboard"
-        disabled={!imageSource}
-        onclick={copyImage}
-      >
-        Copy
-      </Button>
-      <Button
-        title="Share image"
-        disabled={!imageSource}
-        onclick={shareImage}
-      >
-        Share
-      </Button>
-    </ToolbarGroup>
     <ToolbarGroup>
       <Button
         title="Rectangle (hold Shift for square)"
@@ -652,6 +812,10 @@
   <ErrorMessage message={saveError} />
   <ErrorMessage message={copyError} />
   <ErrorMessage message={shareError} />
+
+  {#if savedToast}
+    <p class="saved-toast" role="status">{savedToast}</p>
+  {/if}
 
   <div
     class="canvas-wrap"
@@ -756,10 +920,39 @@
   .shape-icon :global(svg) {
     display: block;
   }
+  .saved-toast {
+    position: fixed;
+    bottom: 20px;
+    left: 50%;
+    transform: translateX(-50%);
+    margin: 0;
+    padding: 8px 16px;
+    font-size: 12px;
+    background: #1d1d1f;
+    color: #f5f5f7;
+    border-radius: 8px;
+    box-shadow: 0 2px 12px rgba(0, 0, 0, 0.2);
+    z-index: 100;
+    animation: fade-in 0.2s ease;
+  }
+  @keyframes fade-in {
+    from {
+      opacity: 0;
+      transform: translateX(-50%) translateY(4px);
+    }
+    to {
+      opacity: 1;
+      transform: translateX(-50%) translateY(0);
+    }
+  }
   @media (prefers-color-scheme: dark) {
     .app {
       color: #f5f5f7;
       background: #1d1d1f;
+    }
+    .saved-toast {
+      background: #f5f5f7;
+      color: #1d1d1f;
     }
   }
 </style>
