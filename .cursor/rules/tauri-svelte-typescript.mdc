@@ -1,0 +1,49 @@
+---
+description: Tauri + Svelte 5 (Runes) + TypeScript project conventions
+alwaysApply: true
+---
+
+# Tauri + Svelte 5 + TypeScript
+
+This project uses **Tauri** for the desktop shell, **Svelte 5** with **Runes** mode, and **TypeScript**.
+
+## Stack
+
+- **Tauri 2**: Frontend in `src/`, Rust backend in `src-tauri/`. Use `@tauri-apps/api` (e.g. `invoke`, `core`) for Rust ↔ frontend.
+- **Svelte 5**: Use Runes only; do not use Svelte 4-style reactivity (`let` + assignment, `$:`).
+- **TypeScript**: Use `lang="ts"` in `<script>`, type APIs and component props.
+
+## Svelte 5 Runes
+
+- **State**: `let x = $state(initial)` — reactive state.
+- **Derived**: `let y = $derived(expression)` — derived from other state.
+- **Effects**: `$effect(() => { ... })` — run when dependencies change.
+- **Props**: `let { prop1, prop2 = default } = $props()` — typed component props.
+
+```svelte
+<!-- ✅ GOOD: Runes -->
+<script lang="ts">
+  let count = $state(0);
+  let doubled = $derived(count * 2);
+  let { label = "Count" } = $props();
+</script>
+<button onclick={() => count++}>{label}: {doubled}</button>
+```
+
+```svelte
+<!-- ❌ BAD: Legacy Svelte 4 -->
+<script lang="ts">
+  let count = 0;
+  $: doubled = count * 2;
+</script>
+```
+
+## TypeScript
+
+- Prefer explicit types for function args, return values, and `$props()`.
+- Use `invoke<T>()` when calling Tauri commands for typed responses.
+
+## Workflow
+
+- **After making changes**: Run the linter (or read linter diagnostics) on edited files and fix all reported errors before considering the task done.
+- Prefer fixing lint issues in the same pass as the change; do not leave new lint errors in the codebase.
