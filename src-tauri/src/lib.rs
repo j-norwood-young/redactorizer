@@ -81,6 +81,21 @@ async fn save_image(
         .unwrap_or(Err("Invalid path".to_string()))
 }
 
+/// Load image from a file path (e.g. from OS drag-drop). Returns base64 PNG.
+#[tauri::command(rename_all = "camelCase")]
+async fn load_image_from_path(path: String) -> Result<(String, String), String> {
+    let path_buf = Path::new(&path).to_path_buf();
+    let bytes = fs::read(&path_buf).map_err(|e| e.to_string())?;
+    let png_bytes = sanitize_to_png(&bytes)?;
+    let base64 = BASE64.encode(&png_bytes);
+    let name = path_buf
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("image.png")
+        .to_string();
+    Ok((base64, name))
+}
+
 /// Accept base64 of any supported image format; return sanitized PNG base64. For drop/paste.
 #[tauri::command(rename_all = "camelCase")]
 async fn any_image_to_png_base64(base64_any: String) -> Result<String, String> {
@@ -120,6 +135,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             open_image_dialog,
             save_image,
+            load_image_from_path,
             any_image_to_png_base64,
             sanitize_image,
             write_temp_image,
@@ -160,8 +176,10 @@ pub fn run() {
 
             // Edit submenu (Copy with Cmd/Ctrl+C)
             let copy_item = MenuItem::with_id(app, "copy", "Copy", true, Some("CmdOrCtrl+C"))?;
+            let paste_item = MenuItem::with_id(app, "paste", "Paste", true, Some("CmdOrCtrl+V"))?;
             let edit_menu = SubmenuBuilder::new(app, "Edit")
                 .item(&copy_item)
+                .item(&paste_item)
                 .build()?;
 
             let menu = MenuBuilder::new(app)

@@ -58,8 +58,22 @@
     "image/bmp",
   ];
 
+  const COMPATIBLE_IMAGE_EXTENSIONS = [
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".gif",
+    ".webp",
+    ".bmp",
+  ];
+
   function isCompatibleImageType(type: string): boolean {
     return COMPATIBLE_IMAGE_TYPES.some((t) => type === t || type.startsWith("image/"));
+  }
+
+  function isCompatibleImagePath(path: string): boolean {
+    const lower = path.toLowerCase();
+    return COMPATIBLE_IMAGE_EXTENSIONS.some((ext) => lower.endsWith(ext));
   }
 
   /** Default save filename: stem of sourceFileName + "-redacted.png". */
@@ -117,6 +131,48 @@
       imageSource = `data:image/png;base64,${pngBase64}`;
       sourceFilePath = null;
       sourceFileName = fileName;
+      lastSavedPath = null;
+      shapes = [];
+      selectedShapeIndex = null;
+      hoveredShapeIndex = null;
+      dragState = null;
+    } catch (e) {
+      openError = e instanceof Error ? e.message : String(e);
+    }
+  }
+
+  /** Load image from a file path (e.g. from Tauri OS drag-drop). */
+  async function loadImageFromPath(filePath: string) {
+    openError = null;
+    try {
+      const [base64, name] = await invoke<[string, string]>("load_image_from_path", {
+        path: filePath,
+      });
+      imageSource = `data:image/png;base64,${base64}`;
+      sourceFilePath = null;
+      sourceFileName = name;
+      lastSavedPath = null;
+      shapes = [];
+      selectedShapeIndex = null;
+      hoveredShapeIndex = null;
+      dragState = null;
+    } catch (e) {
+      openError = e instanceof Error ? e.message : String(e);
+    }
+  }
+
+  /** Paste image from system clipboard (Tauri plugin). */
+  async function pasteImage() {
+    openError = null;
+    try {
+      const base64 = await invoke<string>("plugin:clipboard|read_image_base64");
+      if (!base64 || base64.length === 0) {
+        openError = "No image in clipboard";
+        return;
+      }
+      imageSource = `data:image/png;base64,${base64}`;
+      sourceFilePath = null;
+      sourceFileName = "pasted.png";
       lastSavedPath = null;
       shapes = [];
       selectedShapeIndex = null;
@@ -299,12 +355,29 @@
         case "share":
           shareImage();
           break;
+        case "paste":
+          pasteImage();
+          break;
       }
     }).then((fn) => {
       unlisten = fn;
     });
     return () => {
       unlisten?.();
+    };
+  });
+
+  $effect(() => {
+    let unlistenDrop: (() => void) | undefined;
+    listen<{ paths: string[] }>("tauri://drag-drop", (event) => {
+      const paths = event.payload?.paths ?? [];
+      const imagePath = paths.find((p) => isCompatibleImagePath(p));
+      if (imagePath) loadImageFromPath(imagePath);
+    }).then((fn) => {
+      unlistenDrop = fn;
+    });
+    return () => {
+      unlistenDrop?.();
     };
   });
 
@@ -648,8 +721,7 @@
       }
       return;
     }
-    const mod = e.metaKey;
-    if (!mod) return;
+    const mod = e.metaKey || e.ctrlKey;
     if (e.key === "o") {
       e.preventDefault();
       openImage();
@@ -659,6 +731,9 @@
         if (e.shiftKey) saveImageAs();
         else saveImage();
       }
+    } else if ((e.key === "v" || e.key === "V") && mod) {
+      e.preventDefault();
+      pasteImage();
     }
   }
 
@@ -710,19 +785,9 @@
     }
   }
 
-  async function onPaste(e: ClipboardEvent) {
-    const item = Array.from(e.clipboardData?.items ?? []).find(
-      (i) => i.type.startsWith("image/")
-    );
-    const file = item?.getAsFile();
-    if (!file) return;
+  function onPaste(e: ClipboardEvent) {
     e.preventDefault();
-    try {
-      const base64 = await fileToBase64(file);
-      await loadImageFromBytes(base64, "pasted.png");
-    } catch (_) {
-      openError = "Failed to load pasted image";
-    }
+    pasteImage();
   }
 
   $effect(() => {

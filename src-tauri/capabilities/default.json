@@ -8,7 +8,7 @@
     "opener:default",
     "dialog:allow-open",
     "dialog:allow-save",
-    "clipboard:allow-write-image-base64",
+    "clipboard:allow-write-image-base64","clipboard:allow-read-image-base64",
     "share:allow-share-file"
   ]
 }
