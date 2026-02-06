@@ -27,6 +27,7 @@
   let selectedEffect = $state<EffectType>("pixelate");
   let effectOptions = $state<EffectOptions>({
     fillColor: "#000000",
+    fillOpacity: 1,
     pixelSize: 12,
     blurRadius: 20,
   });
@@ -43,6 +44,8 @@
   let hoveredShapeIndex = $state<number | null>(null);
   let mouseOverImage = $state(false);
   let overlayRect = $state({ left: 0, top: 0, width: 0, height: 0 });
+  /** Shift key held — when drawing, constrains rectangle/ellipse to equal width/height. */
+  let shiftKeyHeld = $state(false);
 
   type DragState =
     | { type: "move"; shapeIndex: number; startX: number; startY: number; startPoints: number[] }
@@ -186,7 +189,7 @@
   }
 
   function applyMove(shape: Shape, dx: number, dy: number): Shape {
-    if (shape.type === "rectangle" || shape.type === "square") {
+    if (shape.type === "rectangle" || shape.type === "square" || shape.type === "ellipse") {
       return { ...shape, points: [shape.points[0] + dx, shape.points[1] + dy, shape.points[2], shape.points[3]] };
     }
     if (shape.type === "circle") {
@@ -208,7 +211,8 @@
     handle: ResizeHandle,
     startBounds: { x: number; y: number; w: number; h: number },
     dx: number,
-    dy: number
+    dy: number,
+    constrainAspect = false
   ): Shape {
     let { x, y, w, h } = startBounds;
     if (handle.includes("e")) w += dx;
@@ -223,6 +227,62 @@
     }
     if (w < 4) w = 4;
     if (h < 4) h = 4;
+
+    // When Shift is held, keep width and height equal (anchor = opposite corner/edge)
+    if (constrainAspect && (shape.type === "rectangle" || shape.type === "square" || shape.type === "ellipse" || shape.type === "circle")) {
+      const s = Math.max(w, h);
+      switch (handle) {
+        case "se":
+          x = x;
+          y = y;
+          w = s;
+          h = s;
+          break;
+        case "sw":
+          x = x + w - s;
+          y = y;
+          w = s;
+          h = s;
+          break;
+        case "ne":
+          x = x;
+          y = y + h - s;
+          w = s;
+          h = s;
+          break;
+        case "nw":
+          x = x + w - s;
+          y = y + h - s;
+          w = s;
+          h = s;
+          break;
+        case "e":
+          x = x;
+          y = y + h / 2 - s / 2;
+          w = s;
+          h = s;
+          break;
+        case "w":
+          x = x + w - s;
+          y = y + h / 2 - s / 2;
+          w = s;
+          h = s;
+          break;
+        case "n":
+          x = x + w / 2 - s / 2;
+          y = y + h - s;
+          w = s;
+          h = s;
+          break;
+        case "s":
+          x = x + w / 2 - s / 2;
+          y = y;
+          w = s;
+          h = s;
+          break;
+      }
+    }
+
     if (shape.type === "rectangle") {
       return { ...shape, points: [x, y, w, h] };
     }
@@ -235,6 +295,9 @@
       const cy = y + h / 2;
       const r = Math.min(w, h) / 2;
       return { ...shape, points: [cx, cy, r] };
+    }
+    if (shape.type === "ellipse") {
+      return { ...shape, points: [x, y, w, h] };
     }
     if (shape.type === "freehand" && shape.points.length >= 4) {
       const pts = shape.points;
@@ -270,6 +333,7 @@
   }
 
   function handlePointerMove(e: PointerEvent) {
+    shiftKeyHeld = e.shiftKey;
     const p = getCanvasPoint(e);
     if (p !== null) {
       const idx = shapeAtPoint(shapes, p.x, p.y);
@@ -292,7 +356,7 @@
         const shape = shapes[d.shapeIndex];
         if (shape)
           shapes = shapes.map((s, i) =>
-            i === d.shapeIndex ? applyResize(shape, d.handle, d.startBounds, dx, dy) : s
+            i === d.shapeIndex ? applyResize(shape, d.handle, d.startBounds, dx, dy, e.shiftKey) : s
           );
       }
       return;
@@ -301,7 +365,7 @@
     if (isDrawing && tool === "freehand" && p) freehandPoints = [...freehandPoints, p.x, p.y];
   }
 
-  function handlePointerUp() {
+  function handlePointerUp(e?: MouseEvent | PointerEvent) {
     if (dragState) {
       dragState = null;
       return;
@@ -314,23 +378,31 @@
     }
     const [x0, y0] = [drawStart.x, drawStart.y];
     const [x1, y1] = [drawCurrent.x, drawCurrent.y];
-    if (tool === "rectangle") {
-      const x = Math.min(x0, x1);
-      const y = Math.min(y0, y1);
-      const w = Math.abs(x1 - x0);
-      const h = Math.abs(y1 - y0);
+    const constrainEqual = e?.shiftKey === true || (e == null && shiftKeyHeld);
+    if (tool === "rectangle" || tool === "square") {
+      let w = Math.abs(x1 - x0);
+      let h = Math.abs(y1 - y0);
+      if (constrainEqual) {
+        const s = Math.max(w, h);
+        w = s;
+        h = s;
+      }
+      const x = x0 < x1 ? x0 : x0 - w;
+      const y = y0 < y1 ? y0 : y0 - h;
       if (w >= 2 && h >= 2)
         shapes = [...shapes, { type: "rectangle", points: [x, y, w, h], effect: selectedEffect }];
-    } else if (tool === "square") {
-      const d = Math.max(Math.abs(x1 - x0), Math.abs(y1 - y0));
-      const x = x0 < x1 ? x0 : x0 - d;
-      const y = y0 < y1 ? y0 : y0 - d;
-      if (d >= 2) shapes = [...shapes, { type: "square", points: [x, y, d, d], effect: selectedEffect }];
-    } else if (tool === "circle") {
-      const cx = (x0 + x1) / 2;
-      const cy = (y0 + y1) / 2;
-      const r = Math.hypot(x1 - x0, y1 - y0) / 2;
-      if (r >= 2) shapes = [...shapes, { type: "circle", points: [cx, cy, r], effect: selectedEffect }];
+    } else if (tool === "ellipse" || tool === "circle") {
+      let w = Math.abs(x1 - x0);
+      let h = Math.abs(y1 - y0);
+      if (constrainEqual) {
+        const s = Math.max(w, h);
+        w = s;
+        h = s;
+      }
+      const x = x0 < x1 ? x0 : x0 - w;
+      const y = y0 < y1 ? y0 : y0 - h;
+      if (w >= 2 && h >= 2)
+        shapes = [...shapes, { type: "ellipse", points: [x, y, w, h], effect: selectedEffect }];
     } else if (tool === "freehand" && freehandPoints.length >= 4) {
       shapes = [...shapes, { type: "freehand", points: [...freehandPoints], effect: selectedEffect }];
     }
@@ -341,6 +413,7 @@
   }
 
   function pointerDown(e: MouseEvent) {
+    shiftKeyHeld = e.shiftKey;
     const p = getCanvasPoint(e);
     if (!p || !imageDimensions) return;
     if (selectedShapeIndex !== null) {
@@ -381,8 +454,8 @@
     handlePointerMove(e as PointerEvent);
   }
 
-  function pointerUp() {
-    handlePointerUp();
+  function pointerUp(e?: MouseEvent | PointerEvent) {
+    handlePointerUp(e);
   }
 
   function deleteSelectedShape() {
@@ -397,6 +470,18 @@
     shapes = shapes.map((s, i) => (i === selectedShapeIndex ? { ...s, effect } : s));
   }
 
+  function setSelectedShapeStrength(value: number) {
+    if (selectedShapeIndex === null) return;
+    const shape = shapes[selectedShapeIndex];
+    const effect = shape.effect;
+    shapes = shapes.map((s, i) => {
+      if (i !== selectedShapeIndex) return s;
+      if (effect === "pixelate") return { ...s, pixelSize: value };
+      if (effect === "blur") return { ...s, blurRadius: value };
+      return { ...s, fillOpacity: value };
+    });
+  }
+
   $effect(() => {
     redrawCanvas({
       canvas: canvasEl,
@@ -409,10 +494,12 @@
       drawCurrent,
       freehandPoints,
       effectOptions,
+      shiftKey: shiftKeyHeld,
     });
   });
 
   function onKeydown(e: KeyboardEvent) {
+    if (e.key === "Shift") shiftKeyHeld = true;
     if (e.key === "Backspace" || e.key === "Delete") {
       if (selectedShapeIndex !== null) {
         e.preventDefault();
@@ -431,10 +518,18 @@
     }
   }
 
+  function onKeyup(e: KeyboardEvent) {
+    if (e.key === "Shift") shiftKeyHeld = false;
+  }
+
   $effect(() => {
     if (typeof document === "undefined") return;
     document.addEventListener("keydown", onKeydown);
-    return () => document.removeEventListener("keydown", onKeydown);
+    document.addEventListener("keyup", onKeyup);
+    return () => {
+      document.removeEventListener("keydown", onKeydown);
+      document.removeEventListener("keyup", onKeyup);
+    };
   });
 
   $effect(() => {
@@ -477,17 +572,39 @@
       </Button>
     </ToolbarGroup>
     <ToolbarGroup>
-      <Button active={tool === "rectangle"} onclick={() => (tool = "rectangle")}>
-        Rectangle
+      <Button
+        title="Rectangle (hold Shift for square)"
+        active={tool === "rectangle"}
+        onclick={() => (tool = "rectangle")}
+      >
+        <span class="shape-icon" aria-hidden="true">
+          <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="3" y="3" width="18" height="18" rx="1" />
+          </svg>
+        </span>
       </Button>
-      <Button active={tool === "square"} onclick={() => (tool = "square")}>
-        Square
+      <Button
+        title="Ellipse (hold Shift for circle)"
+        active={tool === "ellipse"}
+        onclick={() => (tool = "ellipse")}
+      >
+        <span class="shape-icon" aria-hidden="true">
+          <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <ellipse cx="12" cy="12" rx="10" ry="6" />
+          </svg>
+        </span>
       </Button>
-      <Button active={tool === "circle"} onclick={() => (tool = "circle")}>
-        Circle
-      </Button>
-      <Button active={tool === "freehand"} onclick={() => (tool = "freehand")}>
-        Freehand
+      <Button
+        title="Freehand"
+        active={tool === "freehand"}
+        onclick={() => (tool = "freehand")}
+      >
+        <span class="shape-icon" aria-hidden="true">
+          <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 19l7-7 3 3-7 7-3-3z" />
+            <path d="M18 13l-1.5-7.5L2 2l3.5 14.5L13 18l5-5z" />
+          </svg>
+        </span>
       </Button>
     </ToolbarGroup>
     <ToolbarGroup>
@@ -574,7 +691,9 @@
             onShapePointerEnter={(i: number) => (hoveredShapeIndex = i)}
             onShapePointerLeave={() => (hoveredShapeIndex = null)}
             onHandlePointerDown={handleHandlePointerDown}
+            {effectOptions}
             onEffectChange={setSelectedShapeEffect}
+            onEffectStrengthChange={setSelectedShapeStrength}
             onDelete={deleteSelectedShape}
           />
         </div>
@@ -619,6 +738,14 @@
     object-fit: contain;
     background: #e5e5ea;
     cursor: crosshair;
+  }
+  .shape-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .shape-icon :global(svg) {
+    display: block;
   }
   @media (prefers-color-scheme: dark) {
     .app {

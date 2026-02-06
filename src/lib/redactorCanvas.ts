@@ -8,6 +8,11 @@ export function shapePath(ctx: CanvasRenderingContext2D, shape: Shape): void {
   } else if (shape.type === "circle") {
     const [cx, cy, r] = shape.points;
     ctx.arc(cx, cy, r, 0, Math.PI * 2);
+  } else if (shape.type === "ellipse") {
+    const [x, y, w, h] = shape.points;
+    if (w > 0 && h > 0) {
+      ctx.ellipse(x + w / 2, y + h / 2, w / 2, h / 2, 0, 0, Math.PI * 2);
+    }
   } else if (shape.type === "freehand" && shape.points.length >= 4) {
     ctx.moveTo(shape.points[0], shape.points[1]);
     for (let i = 2; i < shape.points.length; i += 2)
@@ -25,6 +30,15 @@ export function pointInShape(shape: Shape, x: number, y: number): boolean {
   if (shape.type === "circle") {
     const [cx, cy, r] = shape.points;
     return Math.hypot(x - cx, y - cy) <= r;
+  }
+  if (shape.type === "ellipse") {
+    const [sx, sy, w, h] = shape.points;
+    if (w <= 0 || h <= 0) return false;
+    const cx = sx + w / 2;
+    const cy = sy + h / 2;
+    const nx = (x - cx) / (w / 2);
+    const ny = (y - cy) / (h / 2);
+    return nx * nx + ny * ny <= 1;
   }
   if (shape.type === "freehand" && shape.points.length >= 6) {
     const pts = shape.points;
@@ -58,6 +72,10 @@ export function shapeBounds(shape: Shape): { x: number; y: number; w: number; h:
   if (shape.type === "circle") {
     const [cx, cy, r] = shape.points;
     return { x: cx - r, y: cy - r, w: 2 * r, h: 2 * r };
+  }
+  if (shape.type === "ellipse") {
+    const [x, y, w, h] = shape.points;
+    return { x, y, w, h };
   }
   if (shape.type === "freehand" && shape.points.length >= 4) {
     let minX = shape.points[0];
@@ -123,6 +141,15 @@ export function shapeToSvgPath(shape: Shape): string {
   if (shape.type === "circle") {
     const [cx, cy, r] = shape.points;
     return `M ${cx + r} ${cy} A ${r} ${r} 0 0 1 ${cx - r} ${cy} A ${r} ${r} 0 0 1 ${cx + r} ${cy} Z`;
+  }
+  if (shape.type === "ellipse") {
+    const [x, y, w, h] = shape.points;
+    if (w <= 0 || h <= 0) return "";
+    const cx = x + w / 2;
+    const cy = y + h / 2;
+    const rx = w / 2;
+    const ry = h / 2;
+    return `M ${cx + rx} ${cy} A ${rx} ${ry} 0 0 1 ${cx - rx} ${cy} A ${rx} ${ry} 0 0 1 ${cx + rx} ${cy} Z`;
   }
   if (shape.type === "freehand" && shape.points.length >= 4) {
     const p = shape.points;
@@ -219,17 +246,15 @@ function applyShapeEffect(
   const pixelSize = shape.pixelSize ?? effectOptions.pixelSize;
   const blurRadius = shape.blurRadius ?? effectOptions.blurRadius;
   const fillColor = shape.fillColor ?? effectOptions.fillColor;
+  const fillOpacity = shape.fillOpacity ?? effectOptions.fillOpacity;
   const { x: bx, y: by, w: bw, h: bh } = bounds;
   if (bw <= 0 || bh <= 0) return;
 
   if (shape.effect === "pixelate") {
-    // Ensure at least 6 blocks per dimension so small regions don't collapse to one colour
-    const minBlocks = 6;
-    const maxPixelSizeW = bw >= minBlocks ? bw / minBlocks : bw;
-    const maxPixelSizeH = bh >= minBlocks ? bh / minBlocks : bh;
+    // Slider maps directly to block size so the full range feels responsive
     const effectivePixelSize = Math.max(
       1,
-      Math.min(pixelSize, maxPixelSizeW, maxPixelSizeH)
+      Math.min(pixelSize, Math.floor(bw), Math.floor(bh))
     );
     const tw = Math.max(1, Math.floor(bw / effectivePixelSize));
     const th = Math.max(1, Math.floor(bh / effectivePixelSize));
@@ -263,8 +288,11 @@ function applyShapeEffect(
     tctx.putImageData(imageData, 0, 0);
     ctx.drawImage(temp, 0, 0, w, h, bx, by, bw, bh);
   } else {
+    ctx.save();
     ctx.fillStyle = fillColor;
+    ctx.globalAlpha = Math.max(0, Math.min(1, fillOpacity));
     ctx.fill();
+    ctx.restore();
   }
 }
 
@@ -279,6 +307,8 @@ export interface RedrawParams {
   drawCurrent: { x: number; y: number } | null;
   freehandPoints: number[];
   effectOptions: EffectOptions;
+  /** When true, constrain rectangle/ellipse preview to equal width and height (square/circle). */
+  shiftKey?: boolean;
 }
 
 export function redrawCanvas(params: RedrawParams): void {
@@ -293,6 +323,7 @@ export function redrawCanvas(params: RedrawParams): void {
     drawCurrent,
     freehandPoints,
     effectOptions,
+    shiftKey = false,
   } = params;
   if (!canvas || !src || !imageDimensions) return;
   const ctx = canvas.getContext("2d");
@@ -317,23 +348,26 @@ export function redrawCanvas(params: RedrawParams): void {
     if (isDrawing && drawStart && drawCurrent) {
       const [x0, y0] = [drawStart.x, drawStart.y];
       const [x1, y1] = [drawCurrent.x, drawCurrent.y];
+      const constrainEqual = shiftKey;
       if (tool === "rectangle" || tool === "square") {
-        const w =
-          tool === "square"
-            ? Math.max(Math.abs(x1 - x0), Math.abs(y1 - y0))
-            : Math.abs(x1 - x0);
-        const h = tool === "square" ? w : Math.abs(y1 - y0);
-        if (tool === "square") {
-          const xx = x0 < x1 ? x0 : x0 - w;
-          const yy = y0 < y1 ? y0 : y0 - w;
-          ctx.strokeRect(xx, yy, w, w);
-        } else ctx.strokeRect(Math.min(x0, x1), Math.min(y0, y1), w, h);
-      } else if (tool === "circle") {
-        const cx = (x0 + x1) / 2;
-        const cy = (y0 + y1) / 2;
-        const r = Math.hypot(x1 - x0, y1 - y0) / 2;
+        const rawW = Math.abs(x1 - x0);
+        const rawH = Math.abs(y1 - y0);
+        const s = constrainEqual ? Math.max(rawW, rawH) : rawW;
+        const h = constrainEqual ? s : rawH;
+        const w = constrainEqual ? s : rawW;
+        const xx = x0 < x1 ? x0 : x0 - w;
+        const yy = y0 < y1 ? y0 : y0 - h;
+        ctx.strokeRect(xx, yy, w, h);
+      } else if (tool === "ellipse" || tool === "circle") {
+        const rawW = Math.abs(x1 - x0);
+        const rawH = Math.abs(y1 - y0);
+        const s = Math.max(rawW, rawH);
+        const w = constrainEqual ? s : rawW;
+        const h = constrainEqual ? s : rawH;
+        const x = x0 < x1 ? x0 : x0 - w;
+        const y = y0 < y1 ? y0 : y0 - h;
         ctx.beginPath();
-        ctx.arc(cx, cy, r, 0, Math.PI * 2);
+        ctx.ellipse(x + w / 2, y + h / 2, w / 2, h / 2, 0, 0, Math.PI * 2);
         ctx.stroke();
       } else if (tool === "freehand" && freehandPoints.length >= 4) {
         ctx.beginPath();

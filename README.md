@@ -5,7 +5,7 @@ A desktop app for redacting sensitive areas in images. Draw shapes over the part
 ## Features
 
 - **Open any image** — Load PNG (or other image formats via the system dialog) to redact.
-- **Shape tools** — Rectangle, square, circle, or freehand to mark regions to redact.
+- **Shape tools** — Rectangle, ellipse, or freehand to mark regions to redact. Hold Option while drawing for equal width/height (square or circle).
 - **Redaction effects** — Pixelate, blur, or solid fill. Adjust pixel size, blur radius, and fill color per effect.
 - **Edit after drawing** — Select shapes to move or resize with handles; change effect or delete (Backspace/Delete).
 - **Export** — Save to file (⌘S), copy to clipboard, or share via the system share sheet.

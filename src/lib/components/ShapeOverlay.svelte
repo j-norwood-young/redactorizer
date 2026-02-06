@@ -1,5 +1,5 @@
 <script lang="ts">
-  import type { Shape, EffectType } from "$lib/types/redactor";
+  import type { Shape, EffectType, EffectOptions } from "$lib/types/redactor";
   import { shapeBounds, shapeToSvgPath, type ResizeHandle } from "$lib/redactorCanvas";
 
   let {
@@ -11,11 +11,13 @@
     selectedIndex = null,
     hoveredIndex = null,
     showOutlines = false,
+    effectOptions,
     onShapePointerDown,
     onShapePointerEnter,
     onShapePointerLeave,
     onHandlePointerDown,
     onEffectChange,
+    onEffectStrengthChange,
     onDelete,
   } = $props<{
     canvasWidth: number;
@@ -26,18 +28,44 @@
     selectedIndex: number | null;
     hoveredIndex: number | null;
     showOutlines: boolean;
+    effectOptions: EffectOptions;
     onShapePointerDown?: (index: number, e: PointerEvent) => void;
     onShapePointerEnter?: (index: number) => void;
     onShapePointerLeave?: () => void;
     onHandlePointerDown?: (handle: ResizeHandle, e: PointerEvent) => void;
     onEffectChange?: (effect: EffectType) => void;
+    onEffectStrengthChange?: (value: number) => void;
     onDelete?: () => void;
   }>();
 
-  const TOOLBAR_WIDTH = 185;
-  const TOOLBAR_HEIGHT = 42;
+  const TOOLBAR_WIDTH = 200;
+  const TOOLBAR_HEIGHT = 66;
   const TOOLBAR_GAP = 8;
   const OVERLAY_EDGE_MARGIN = 8;
+
+  const STRENGTH_CONFIG: Record<
+    EffectType,
+    { min: number; max: number; step: number; default: number }
+  > = {
+    pixelate: { min: 4, max: 48, step: 2, default: 12 },
+    blur: { min: 4, max: 48, step: 2, default: 20 },
+    fill: { min: 0, max: 1, step: 0.01, default: 1 },
+  };
+
+  const strengthState = $derived.by(() => {
+    if (selectedIndex === null || !shapes[selectedIndex] || !effectOptions) return null;
+    const shape = shapes[selectedIndex];
+    const effect: EffectType = shape.effect;
+    const config = STRENGTH_CONFIG[effect];
+    const value =
+      effect === "pixelate"
+        ? shape.pixelSize ?? effectOptions.pixelSize
+        : effect === "blur"
+          ? shape.blurRadius ?? effectOptions.blurRadius
+          : shape.fillOpacity ?? effectOptions.fillOpacity;
+    const clamped = Math.max(config.min, Math.min(config.max, value));
+    return { effect, config, value: clamped };
+  });
 
   const toolbarStyle = $derived.by(() => {
     if (selectedIndex === null || !shapes[selectedIndex] || overlayWidth <= 0 || overlayHeight <= 0)
@@ -156,49 +184,71 @@
       style="left: {toolbarStyle.left}; top: {toolbarStyle.top}; width: {toolbarStyle.width}; height: {toolbarStyle.height}"
     >
       <div class="toolbar-inner">
-        <button
-          type="button"
-          class="effect-btn"
-          class:active={selShape.effect === "pixelate"}
-          onclick={() => onEffectChange?.("pixelate")}
-        >
-          Pixelate
-        </button>
-        <button
-          type="button"
-          class="effect-btn"
-          class:active={selShape.effect === "blur"}
-          onclick={() => onEffectChange?.("blur")}
-        >
-          Blur
-        </button>
-        <button
-          type="button"
-          class="effect-btn"
-          class:active={selShape.effect === "fill"}
-          onclick={() => onEffectChange?.("fill")}
-        >
-          Fill
-        </button>
-        <button
-          type="button"
-          class="delete-btn"
-          title="Delete"
-          onpointerdown={(e) => e.stopPropagation()}
-          onclick={(e) => {
-            e.preventDefault();
-            e.stopPropagation();
-            onDelete?.();
-          }}
-        >
-          <span class="delete-icon" aria-hidden="true">
-            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
-              <line x1="10" y1="11" x2="10" y2="17" />
-              <line x1="14" y1="11" x2="14" y2="17" />
-            </svg>
-          </span>
-        </button>
+        <div class="toolbar-row toolbar-buttons">
+          <button
+            type="button"
+            class="effect-btn"
+            class:active={selShape.effect === "pixelate"}
+            onclick={() => onEffectChange?.("pixelate")}
+          >
+            Pixelate
+          </button>
+          <button
+            type="button"
+            class="effect-btn"
+            class:active={selShape.effect === "blur"}
+            onclick={() => onEffectChange?.("blur")}
+          >
+            Blur
+          </button>
+          <button
+            type="button"
+            class="effect-btn"
+            class:active={selShape.effect === "fill"}
+            onclick={() => onEffectChange?.("fill")}
+          >
+            Fill
+          </button>
+          <button
+            type="button"
+            class="delete-btn"
+            title="Delete"
+            onpointerdown={(e) => e.stopPropagation()}
+            onclick={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              onDelete?.();
+            }}
+          >
+            <span class="delete-icon" aria-hidden="true">
+              <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+                <line x1="10" y1="11" x2="10" y2="17" />
+                <line x1="14" y1="11" x2="14" y2="17" />
+              </svg>
+            </span>
+          </button>
+        </div>
+        {#if strengthState}
+          <div class="toolbar-row toolbar-slider-row">
+            <input
+              type="range"
+              class="strength-slider"
+              min={strengthState.config.min}
+              max={strengthState.config.max}
+              step={strengthState.config.step}
+              value={strengthState.value}
+              title={strengthState.effect === "fill"
+                ? `Opacity ${Math.round(strengthState.value * 100)}%`
+                : `Strength ${strengthState.value}`}
+              oninput={(e) => {
+                const v = parseFloat((e.currentTarget as HTMLInputElement).value);
+                onEffectStrengthChange?.(v);
+              }}
+              onpointerdown={(e) => e.stopPropagation()}
+            />
+          </div>
+        {/if}
       </div>
     </div>
   {/if}
@@ -266,13 +316,54 @@
   }
   .toolbar-inner {
     display: flex;
-    align-items: center;
-    gap: 4px;
-    padding: 4px 6px;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 6px;
+    padding: 6px 8px;
     background: #fff;
     border-radius: 8px;
     box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
     border: 1px solid rgba(0, 0, 0, 0.08);
+    width: 100%;
+    box-sizing: border-box;
+  }
+  .toolbar-row {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+  }
+  .toolbar-buttons {
+    flex: 0 0 auto;
+  }
+  .toolbar-slider-row {
+    padding: 0 2px;
+  }
+  .strength-slider {
+    width: 100%;
+    height: 4px;
+    margin: 0;
+    -webkit-appearance: none;
+    appearance: none;
+    background: rgba(0, 0, 0, 0.12);
+    border-radius: 2px;
+  }
+  .strength-slider::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    background: #2563eb;
+    cursor: pointer;
+    border: none;
+  }
+  .strength-slider::-moz-range-thumb {
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    background: #2563eb;
+    cursor: pointer;
+    border: none;
   }
   .effect-btn,
   .delete-btn {
@@ -299,7 +390,7 @@
     padding: 6px;
     margin-left: 2px;
     border-left: 1px solid rgba(0, 0, 0, 0.1);
-    color: #f8f8f8;
+    color: #dc2626;
   }
   .delete-btn:hover {
     background: rgba(220, 38, 38, 0.1);
@@ -335,6 +426,15 @@
     }
     .delete-btn:hover {
       background: rgba(248, 113, 113, 0.15);
+    }
+    .strength-slider {
+      background: rgba(255, 255, 255, 0.2);
+    }
+    .strength-slider::-webkit-slider-thumb {
+      background: #93c5fd;
+    }
+    .strength-slider::-moz-range-thumb {
+      background: #93c5fd;
     }
   }
 </style>
