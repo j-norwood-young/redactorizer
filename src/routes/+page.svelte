@@ -15,6 +15,7 @@
     ToolbarGroup,
     ErrorMessage,
     Placeholder,
+    LoadingIndicator,
     EffectOptions as EffectOptionsComponent,
     ShapeOverlay,
   } from "$lib/components";
@@ -240,6 +241,7 @@
       imageDimensions = null;
       return;
     }
+    imageDimensions = null;
     const img = new Image();
     img.onload = () => drawImageOnCanvas(img);
     img.onerror = () => (openError = "Failed to load image");
@@ -330,7 +332,12 @@
     }
     try {
       const path = await invoke<string>("write_temp_image", { base64Png: base64 });
-      await invoke("plugin:share|share_file", { path, mime: "image/png" });
+      try {
+        await invoke("plugin:share|share_file", { path, mime: "image/png" });
+      } catch {
+        // Desktop: tauri-plugin-share only implements share_file on mobile; open with default app
+        await invoke("share_image_open_with_app", { path });
+      }
     } catch (e) {
       shareError = e instanceof Error ? e.message : String(e);
     }
@@ -691,9 +698,14 @@
       if (effect === "blur") return { ...s, blurRadius: value };
       return { ...s, fillOpacity: value };
     });
-    if (effect === "pixelate") effectOptions = { ...effectOptions, pixelSize: value };
-    else if (effect === "blur") effectOptions = { ...effectOptions, blurRadius: value };
-    else effectOptions = { ...effectOptions, fillOpacity: value };
+  }
+
+  function setSelectedShapeFillColor(color: string) {
+    if (selectedShapeIndex === null) return;
+    shapes = shapes.map((s, i) =>
+      i === selectedShapeIndex ? { ...s, fillColor: color } : s
+    );
+    effectOptions = { ...effectOptions, fillColor: color };
   }
 
   $effect(() => {
@@ -806,6 +818,16 @@
 >
   <Toolbar>
     <ToolbarGroup>
+      <Button title="Open image (⌘O)" onclick={openImage}>Open</Button>
+      <Button
+        title="Save (⌘S)"
+        onclick={saveImage}
+        disabled={!imageSource}
+      >
+        Save
+      </Button>
+    </ToolbarGroup>
+    <ToolbarGroup>
       <Button
         title="Rectangle (hold Shift for square)"
         active={tool === "rectangle"}
@@ -869,7 +891,16 @@
       >
         Fill
       </Button>
-      <EffectOptionsComponent bind:effectOptions {selectedEffect} />
+      <EffectOptionsComponent
+        bind:effectOptions
+        {selectedEffect}
+        fillColorValue={selectedShapeIndex != null && shapes[selectedShapeIndex]?.effect === "fill"
+          ? (shapes[selectedShapeIndex].fillColor ?? effectOptions.fillColor)
+          : undefined}
+        onFillColorChange={selectedShapeIndex != null && shapes[selectedShapeIndex]?.effect === "fill"
+          ? setSelectedShapeFillColor
+          : undefined}
+      />
     </ToolbarGroup>
   </Toolbar>
 
@@ -897,11 +928,17 @@
       <canvas
         bind:this={canvasEl}
         class="canvas"
+        class:canvas-loading={!imageDimensions}
         onmousedown={pointerDown}
         onmousemove={pointerMove}
         onmouseup={pointerUp}
         onmouseleave={pointerUp}
       ></canvas>
+      {#if !imageDimensions}
+        <div class="image-loading-overlay" aria-busy="true">
+          <LoadingIndicator message="Loading image…" size="large" />
+        </div>
+      {/if}
       {#if imageDimensions && overlayRect.width > 0 && overlayRect.height > 0}
         <div
           class="overlay-wrapper"
@@ -966,6 +1003,15 @@
     justify-content: center;
     padding: 16px;
   }
+  .image-loading-overlay {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(245, 245, 247, 0.85);
+    z-index: 10;
+  }
   .overlay-wrapper {
     position: absolute;
   }
@@ -976,6 +1022,9 @@
     object-fit: contain;
     background: #e5e5ea;
     cursor: crosshair;
+  }
+  .canvas-loading {
+    visibility: hidden;
   }
   .shape-icon {
     display: inline-flex;
@@ -1014,6 +1063,9 @@
     .app {
       color: #f5f5f7;
       background: #1d1d1f;
+    }
+    .image-loading-overlay {
+      background: rgba(29, 29, 31, 0.85);
     }
     .saved-toast {
       background: #f5f5f7;
