@@ -6,6 +6,8 @@ use std::path::Path;
 use tauri::menu::{MenuBuilder, MenuItem, PredefinedMenuItem, SubmenuBuilder};
 use tauri::Emitter;
 use tauri_plugin_dialog::DialogExt;
+#[cfg(not(target_os = "macos"))]
+use tauri_plugin_opener::OpenerExt;
 
 #[derive(serde::Serialize)]
 struct OpenImageResult {
@@ -125,6 +127,65 @@ async fn write_temp_image(base64_png: String) -> Result<String, String> {
         .map_err(|_| "Invalid path".to_string())
 }
 
+/// Share image: on macOS use native Share menu (AirDrop, Mail, etc.); on other desktops open with default app.
+#[tauri::command]
+fn share_image_open_with_app(app: tauri::AppHandle, path: String) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    return share_image_macos_native(&app, &path);
+
+    #[cfg(not(target_os = "macos"))]
+    app.opener()
+        .open_path(&path, None::<&str>)
+        .map_err(|e| e.to_string())
+}
+
+#[cfg(target_os = "macos")]
+fn share_image_macos_native(app: &tauri::AppHandle, path: &str) -> Result<(), String> {
+    use objc2::AnyThread;
+    use objc2_foundation::{NSArray, NSRect, NSRectEdge, NSURL};
+    use objc2_app_kit::{NSSharingServicePicker, NSView};
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    use std::path::Path;
+    use tauri::Manager;
+
+    let app = app.clone();
+    let path = path.to_string();
+
+    dispatch2::run_on_main(move |_mtm| {
+        let window = app
+            .get_webview_window("main")
+            .or_else(|| app.webview_windows().into_values().next())
+            .ok_or("No window available for share")?;
+
+        let raw = window
+            .window_handle()
+            .map_err(|e| format!("Window handle: {}", e))?
+            .as_raw();
+
+        let ns_view_ptr = match raw {
+            RawWindowHandle::AppKit(api) => api.ns_view.as_ptr(),
+            _ => return Err("Not an AppKit window".to_string()),
+        };
+
+        let url = NSURL::from_file_path(Path::new(&path))
+            .ok_or_else(|| "Invalid file path for share".to_string())?;
+        let items = NSArray::from_retained_slice(&[url.into_super()]);
+
+        let allocated = NSSharingServicePicker::alloc();
+        let items_ref: &NSArray = unsafe { &*(&*items as *const _ as *const NSArray) };
+        let picker = unsafe { NSSharingServicePicker::initWithItems(allocated, items_ref) };
+
+        let view = unsafe { &*ns_view_ptr.cast::<NSView>() };
+        picker.showRelativeToRect_ofView_preferredEdge(
+            NSRect::default(),
+            view,
+            NSRectEdge::MinY,
+        );
+
+        Ok(())
+    })
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -139,6 +200,7 @@ pub fn run() {
             any_image_to_png_base64,
             sanitize_image,
             write_temp_image,
+            share_image_open_with_app,
         ])
         .setup(|app| {
             // App submenu (first = application menu on macOS: About, Hide, Quit, etc.)
