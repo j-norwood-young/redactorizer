@@ -1,14 +1,16 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
   import { listen } from "@tauri-apps/api/event";
-  import type { Shape, ShapeType, EffectType, EffectOptions } from "$lib/types/redactor";
+  import type { Shape, ShapeType, EffectType, EffectOptions, DocumentSource, ShapesByPage } from "$lib/types/redactor";
   import {
     redrawCanvas,
     shapeAtPoint,
     shapeBounds,
     getHandleAtPoint,
+    renderToPngBase64,
     type ResizeHandle,
   } from "$lib/redactorCanvas";
+  import { loadPdfDocument, renderPageToDataUrl, renderPageThumbnail, type PDFDocumentProxy } from "$lib/pdf";
   import {
     Button,
     Toolbar,
@@ -18,6 +20,7 @@
     LoadingIndicator,
     EffectOptions as EffectOptionsComponent,
     ShapeOverlay,
+    PageSidebar,
   } from "$lib/components";
 
   let canvasEl = $state<HTMLCanvasElement | null>(null);
@@ -32,7 +35,20 @@
   let lastSavedPath = $state<string | null>(null);
   /** Brief "Saved to …" message shown after a save. */
   let savedToast = $state<string | null>(null);
-  let shapes = $state<Shape[]>([]);
+  /** Document: image (single page) or PDF (multi-page). Null when no document open. */
+  let documentSource = $state<DocumentSource | null>(null);
+  /** Current page index (0-based). For image docs always 0. */
+  let currentPageIndex = $state(0);
+  /** Shapes per page index. For image docs only key 0 is used. */
+  let shapesByPage = $state<ShapesByPage>({});
+  /** Derived: shapes for the current page. */
+  let currentPageShapes = $derived(shapesByPage[currentPageIndex] ?? []);
+  /** Loaded PDF document proxy (only set when documentSource.type === "pdf"). */
+  let pdfDocRef = $state<PDFDocumentProxy | null>(null);
+  /** Cached thumbnail data URLs per page index for PDF sidebar. */
+  let pdfThumbnails = $state<Record<number, string>>({});
+  /** Scale used when rendering PDF page to main canvas (2 = 2x for sharpness). */
+  const PDF_PAGE_SCALE = 2;
   let tool = $state<ShapeType>("rectangle");
   let selectedEffect = $state<EffectType>("pixelate");
   let effectOptions = $state<EffectOptions>({
@@ -77,12 +93,26 @@
     return COMPATIBLE_IMAGE_EXTENSIONS.some((ext) => lower.endsWith(ext));
   }
 
-  /** Default save filename: stem of sourceFileName + "-redacted.png". */
+  function isCompatibleDocumentPath(path: string): boolean {
+    const lower = path.toLowerCase();
+    return lower.endsWith(".pdf") || COMPATIBLE_IMAGE_EXTENSIONS.some((ext) => lower.endsWith(ext));
+  }
+
+  /** Default save filename: for image "-redacted.png", for PDF "-page-N.png". */
   function getDefaultSaveName(): string {
-    if (!sourceFileName || sourceFileName === "redacted.png") return "redacted.png";
     const lastDot = sourceFileName.lastIndexOf(".");
-    const stem = lastDot > 0 ? sourceFileName.slice(0, lastDot) : sourceFileName;
+    const stem = lastDot > 0 ? sourceFileName.slice(0, lastDot) : sourceFileName || "document";
+    if (documentSource?.type === "pdf") {
+      return `${stem}-page-${currentPageIndex + 1}.png`;
+    }
+    if (!sourceFileName || sourceFileName === "redacted.png") return "redacted.png";
     return `${stem}-redacted.png`;
+  }
+
+  /** Update shapes for the current page. */
+  function setCurrentPageShapes(updater: (prev: Shape[]) => Shape[]) {
+    const prev = shapesByPage[currentPageIndex] ?? [];
+    shapesByPage = { ...shapesByPage, [currentPageIndex]: updater(prev) };
   }
 
   let selectedShapeIndex = $state<number | null>(null);
@@ -104,19 +134,61 @@
       };
   let dragState = $state<DragState | null>(null);
 
-  async function openImage() {
+  /** Load a PDF from base64 (used after open dialog, drop, or load from path). */
+  async function loadPdfFromBase64(base64: string, fileName: string, filePath: string | null = null) {
+    imageSource = null;
+    imageDimensions = null;
+    documentSource = null;
+    pdfDocRef = null;
+    sourceFilePath = filePath ?? null;
+    sourceFileName = fileName;
+    lastSavedPath = null;
+    currentPageIndex = 0;
+    shapesByPage = {};
+    pdfThumbnails = {};
+    selectedShapeIndex = null;
+    hoveredShapeIndex = null;
+    dragState = null;
+    try {
+      const binary = Uint8Array.from(atob(base64), (c) => c.charCodeAt(0));
+      const pdf = await loadPdfDocument(binary.buffer);
+      documentSource = { type: "pdf", documentId: filePath ?? fileName, numPages: pdf.numPages };
+      pdfDocRef = pdf;
+      const page = await pdf.getPage(1);
+      const dataUrl = await renderPageToDataUrl(page, PDF_PAGE_SCALE);
+      imageSource = dataUrl;
+    } catch (e) {
+      openError = e instanceof Error ? e.message : String(e);
+      documentSource = null;
+      pdfDocRef = null;
+    }
+  }
+
+  /** Open document (image or PDF) via file dialog. */
+  async function openDocument() {
     openError = null;
     try {
-      const result = await invoke<{ path: string; base64: string } | null>("open_image_dialog");
-      if (result) {
-        imageSource = `data:image/png;base64,${result.base64}`;
+      const result = await invoke<{ path: string; base64: string; format: string } | null>(
+        "open_document_dialog"
+      );
+      if (!result) return;
+      if (result.format === "image") {
+        const dataUrl = `data:image/png;base64,${result.base64}`;
+        imageSource = dataUrl;
+        documentSource = { type: "image", dataUrl };
+        pdfDocRef = null;
         sourceFilePath = result.path;
         sourceFileName = result.path.split(/[/\\]/).pop() ?? "image.png";
         lastSavedPath = null;
-        shapes = [];
+        currentPageIndex = 0;
+        shapesByPage = {};
         selectedShapeIndex = null;
         hoveredShapeIndex = null;
         dragState = null;
+        return;
+      }
+      if (result.format === "pdf") {
+        await loadPdfFromBase64(result.base64, result.path.split(/[/\\]/).pop() ?? "document.pdf");
       }
     } catch (e) {
       openError = e instanceof Error ? e.message : String(e);
@@ -129,11 +201,14 @@
       const pngBase64 = await invoke<string>("any_image_to_png_base64", {
         base64Any,
       });
-      imageSource = `data:image/png;base64,${pngBase64}`;
+      const dataUrl = `data:image/png;base64,${pngBase64}`;
+      imageSource = dataUrl;
+      documentSource = { type: "image", dataUrl };
       sourceFilePath = null;
       sourceFileName = fileName;
       lastSavedPath = null;
-      shapes = [];
+      currentPageIndex = 0;
+      shapesByPage = {};
       selectedShapeIndex = null;
       hoveredShapeIndex = null;
       dragState = null;
@@ -149,14 +224,49 @@
       const [base64, name] = await invoke<[string, string]>("load_image_from_path", {
         path: filePath,
       });
-      imageSource = `data:image/png;base64,${base64}`;
+      const dataUrl = `data:image/png;base64,${base64}`;
+      imageSource = dataUrl;
+      documentSource = { type: "image", dataUrl };
       sourceFilePath = null;
       sourceFileName = name;
       lastSavedPath = null;
-      shapes = [];
+      currentPageIndex = 0;
+      shapesByPage = {};
       selectedShapeIndex = null;
       hoveredShapeIndex = null;
       dragState = null;
+    } catch (e) {
+      openError = e instanceof Error ? e.message : String(e);
+    }
+  }
+
+  /** Load document (image or PDF) from a file path (e.g. Tauri OS drag-drop). */
+  async function loadDocumentFromPath(filePath: string) {
+    openError = null;
+    try {
+      const result = await invoke<{ path: string; base64: string; format: string }>(
+        "load_document_from_path",
+        { path: filePath }
+      );
+      const name = result.path.split(/[/\\]/).pop() ?? "document";
+      if (result.format === "image") {
+        const dataUrl = `data:image/png;base64,${result.base64}`;
+        imageSource = dataUrl;
+        documentSource = { type: "image", dataUrl };
+        pdfDocRef = null;
+        sourceFilePath = null;
+        sourceFileName = name;
+        lastSavedPath = null;
+        currentPageIndex = 0;
+        shapesByPage = {};
+        selectedShapeIndex = null;
+        hoveredShapeIndex = null;
+        dragState = null;
+        return;
+      }
+      if (result.format === "pdf") {
+        await loadPdfFromBase64(result.base64, name, result.path);
+      }
     } catch (e) {
       openError = e instanceof Error ? e.message : String(e);
     }
@@ -171,11 +281,14 @@
         openError = "No image in clipboard";
         return;
       }
-      imageSource = `data:image/png;base64,${base64}`;
+      const dataUrl = `data:image/png;base64,${base64}`;
+      imageSource = dataUrl;
+      documentSource = { type: "image", dataUrl };
       sourceFilePath = null;
       sourceFileName = "pasted.png";
       lastSavedPath = null;
-      shapes = [];
+      currentPageIndex = 0;
+      shapesByPage = {};
       selectedShapeIndex = null;
       hoveredShapeIndex = null;
       dragState = null;
@@ -235,6 +348,56 @@
     ctx.drawImage(img, 0, 0);
   }
 
+  /** Generate thumbnails for all PDF pages when a PDF is loaded. */
+  $effect(() => {
+    const doc = documentSource;
+    const pdf = pdfDocRef;
+    if (doc?.type !== "pdf" || !pdf) return;
+    const numPages = doc.numPages;
+    let cancelled = false;
+    const acc: Record<number, string> = {};
+    (async () => {
+      for (let i = 0; i < numPages && !cancelled; i++) {
+        try {
+          const page = await pdf.getPage(i + 1);
+          if (cancelled) return;
+          const dataUrl = await renderPageThumbnail(page);
+          if (cancelled) return;
+          acc[i] = dataUrl;
+          pdfThumbnails = { ...acc };
+        } catch (_) {
+          // skip failed page
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  });
+
+  /** When PDF and current page changes, render that page to imageSource. */
+  $effect(() => {
+    const doc = documentSource;
+    const pdf = pdfDocRef;
+    const pageIndex = currentPageIndex;
+    if (doc?.type !== "pdf" || !pdf || pageIndex < 0 || pageIndex >= doc.numPages) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const page = await pdf.getPage(pageIndex + 1);
+        if (cancelled) return;
+        const dataUrl = await renderPageToDataUrl(page, PDF_PAGE_SCALE);
+        if (cancelled) return;
+        imageSource = dataUrl;
+      } catch (e) {
+        if (!cancelled) openError = e instanceof Error ? e.message : String(e);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  });
+
   $effect(() => {
     const src = imageSource;
     if (!src) {
@@ -250,7 +413,7 @@
 
   function getExportBase64(): string | null {
     const canvas = canvasEl;
-    if (!canvas || !imageSource) return null;
+    if (!canvas || !documentSource) return null;
     const dataUrl = canvas.toDataURL("image/png");
     return dataUrl.replace(/^data:image\/png;base64,/, "");
   }
@@ -343,12 +506,58 @@
     }
   }
 
+  /** Export all PDF pages as PNGs (one save dialog, then batch write). */
+  async function exportAllPdfPages() {
+    const doc = documentSource;
+    if (doc?.type !== "pdf" || !pdfDocRef) return;
+    saveError = null;
+    const numPages = doc.numPages;
+    const lastDot = sourceFileName.lastIndexOf(".");
+    const stem = lastDot > 0 ? sourceFileName.slice(0, lastDot) : sourceFileName || "document";
+    const defaultFirstName = `${stem}-page-1.png`;
+    try {
+      const base64s: string[] = [];
+      for (let i = 0; i < numPages; i++) {
+        const shapes = shapesByPage[i] ?? [];
+        let imageSourcePage: string;
+        let imageDimensionsPage: { width: number; height: number };
+        if (i === currentPageIndex && imageSource && imageDimensions) {
+          imageSourcePage = imageSource;
+          imageDimensionsPage = imageDimensions;
+        } else {
+          const page = await pdfDocRef.getPage(i + 1);
+          imageSourcePage = await renderPageToDataUrl(page, PDF_PAGE_SCALE);
+          const img = new Image();
+          imageDimensionsPage = await new Promise((resolve, reject) => {
+            img.onload = () => resolve({ width: img.naturalWidth, height: img.naturalHeight });
+            img.onerror = () => reject(new Error("Failed to load page image"));
+            img.src = imageSourcePage;
+          });
+        }
+        const base64 = await renderToPngBase64({
+          imageSource: imageSourcePage,
+          imageDimensions: imageDimensionsPage,
+          shapes,
+          effectOptions,
+        });
+        base64s.push(base64);
+      }
+      const path = await invoke<string | null>("save_images_batch", {
+        base64Pngs: base64s,
+        defaultFirstName,
+      });
+      if (path) showSavedToast(path);
+    } catch (e) {
+      saveError = e instanceof Error ? e.message : String(e);
+    }
+  }
+
   $effect(() => {
     let unlisten: (() => void) | undefined;
     listen<string>("menu-action", (event) => {
       switch (event.payload) {
         case "open":
-          openImage();
+          openDocument();
           break;
         case "save":
           saveImage();
@@ -378,8 +587,8 @@
     let unlistenDrop: (() => void) | undefined;
     listen<{ paths: string[] }>("tauri://drag-drop", (event) => {
       const paths = event.payload?.paths ?? [];
-      const imagePath = paths.find((p) => isCompatibleImagePath(p));
-      if (imagePath) loadImageFromPath(imagePath);
+      const docPath = paths.find((p) => isCompatibleDocumentPath(p));
+      if (docPath) loadDocumentFromPath(docPath);
     }).then((fn) => {
       unlistenDrop = fn;
     });
@@ -529,7 +738,7 @@
     selectedShapeIndex = index;
     const p = getCanvasPoint(e);
     if (!p) return;
-    const shape = shapes[index];
+    const shape = currentPageShapes[index];
     if (!shape) return;
     dragState = { type: "move", shapeIndex: index, startX: p.x, startY: p.y, startPoints: [...shape.points] };
   }
@@ -538,7 +747,7 @@
     if (selectedShapeIndex === null) return;
     const p = getCanvasPoint(e);
     if (!p) return;
-    const shape = shapes[selectedShapeIndex];
+    const shape = currentPageShapes[selectedShapeIndex];
     if (!shape) return;
     const bounds = shapeBounds(shape);
     dragState = { type: "resize", shapeIndex: selectedShapeIndex, handle, startX: p.x, startY: p.y, startBounds: { ...bounds } };
@@ -548,7 +757,7 @@
     shiftKeyHeld = e.shiftKey;
     const p = getCanvasPoint(e);
     if (p !== null) {
-      const idx = shapeAtPoint(shapes, p.x, p.y);
+      const idx = shapeAtPoint(currentPageShapes, p.x, p.y);
       hoveredShapeIndex = idx >= 0 ? idx : null;
     }
     if (dragState) {
@@ -558,17 +767,21 @@
         const dy = p.y - dragState.startY;
         const idx = dragState.shapeIndex;
         const startPoints = dragState.startPoints;
-        shapes = shapes.map((s, i) =>
-          i === idx ? applyMove({ ...s, points: startPoints }, dx, dy) : s
+        setCurrentPageShapes((s) =>
+          s.map((shape, i) =>
+            i === idx ? applyMove({ ...shape, points: startPoints }, dx, dy) : shape
+          )
         );
       } else {
         const d = dragState;
         const dx = p.x - d.startX;
         const dy = p.y - d.startY;
-        const shape = shapes[d.shapeIndex];
+        const shape = currentPageShapes[d.shapeIndex];
         if (shape)
-          shapes = shapes.map((s, i) =>
-            i === d.shapeIndex ? applyResize(shape, d.handle, d.startBounds, dx, dy, e.shiftKey) : s
+          setCurrentPageShapes((s) =>
+            s.map((sh, i) =>
+              i === d.shapeIndex ? applyResize(shape, d.handle, d.startBounds, dx, dy, e.shiftKey) : sh
+            )
           );
       }
       return;
@@ -602,8 +815,8 @@
       const x = x0 < x1 ? x0 : x0 - w;
       const y = y0 < y1 ? y0 : y0 - h;
       if (w >= 2 && h >= 2) {
-        shapes = [...shapes, { type: "rectangle", points: [x, y, w, h], effect: selectedEffect }];
-        selectedShapeIndex = shapes.length - 1;
+        setCurrentPageShapes((prev) => [...prev, { type: "rectangle", points: [x, y, w, h], effect: selectedEffect }]);
+        selectedShapeIndex = currentPageShapes.length;
       }
     } else if (tool === "ellipse" || tool === "circle") {
       let w = Math.abs(x1 - x0);
@@ -616,12 +829,12 @@
       const x = x0 < x1 ? x0 : x0 - w;
       const y = y0 < y1 ? y0 : y0 - h;
       if (w >= 2 && h >= 2) {
-        shapes = [...shapes, { type: "ellipse", points: [x, y, w, h], effect: selectedEffect }];
-        selectedShapeIndex = shapes.length - 1;
+        setCurrentPageShapes((prev) => [...prev, { type: "ellipse", points: [x, y, w, h], effect: selectedEffect }]);
+        selectedShapeIndex = currentPageShapes.length;
       }
     } else if (tool === "freehand" && freehandPoints.length >= 4) {
-      shapes = [...shapes, { type: "freehand", points: [...freehandPoints], effect: selectedEffect }];
-      selectedShapeIndex = shapes.length - 1;
+      setCurrentPageShapes((prev) => [...prev, { type: "freehand", points: [...freehandPoints], effect: selectedEffect }]);
+      selectedShapeIndex = currentPageShapes.length;
     }
     isDrawing = false;
     drawStart = null;
@@ -634,7 +847,7 @@
     const p = getCanvasPoint(e);
     if (!p || !imageDimensions) return;
     if (selectedShapeIndex !== null) {
-      const bounds = shapeBounds(shapes[selectedShapeIndex]);
+      const bounds = shapeBounds(currentPageShapes[selectedShapeIndex]);
       const handle = getHandleAtPoint(bounds, p.x, p.y);
       if (handle) {
         dragState = {
@@ -648,7 +861,7 @@
         return;
       }
     }
-    const idx = shapeAtPoint(shapes, p.x, p.y);
+    const idx = shapeAtPoint(currentPageShapes, p.x, p.y);
     if (idx >= 0) {
       selectedShapeIndex = idx;
       dragState = {
@@ -656,7 +869,7 @@
         shapeIndex: idx,
         startX: p.x,
         startY: p.y,
-        startPoints: [...shapes[idx].points],
+        startPoints: [...currentPageShapes[idx].points],
       };
       return;
     }
@@ -677,33 +890,35 @@
 
   function deleteSelectedShape() {
     if (selectedShapeIndex === null) return;
-    shapes = shapes.filter((_, i) => i !== selectedShapeIndex);
+    setCurrentPageShapes((prev) => prev.filter((_, i) => i !== selectedShapeIndex));
     selectedShapeIndex = null;
     dragState = null;
   }
 
   function setSelectedShapeEffect(effect: EffectType) {
     if (selectedShapeIndex === null) return;
-    shapes = shapes.map((s, i) => (i === selectedShapeIndex ? { ...s, effect } : s));
+    setCurrentPageShapes((prev) => prev.map((s, i) => (i === selectedShapeIndex ? { ...s, effect } : s)));
     selectedEffect = effect;
   }
 
   function setSelectedShapeStrength(value: number) {
     if (selectedShapeIndex === null) return;
-    const shape = shapes[selectedShapeIndex];
+    const shape = currentPageShapes[selectedShapeIndex];
     const effect = shape.effect;
-    shapes = shapes.map((s, i) => {
-      if (i !== selectedShapeIndex) return s;
-      if (effect === "pixelate") return { ...s, pixelSize: value };
-      if (effect === "blur") return { ...s, blurRadius: value };
-      return { ...s, fillOpacity: value };
-    });
+    setCurrentPageShapes((prev) =>
+      prev.map((s, i) => {
+        if (i !== selectedShapeIndex) return s;
+        if (effect === "pixelate") return { ...s, pixelSize: value };
+        if (effect === "blur") return { ...s, blurRadius: value };
+        return { ...s, fillOpacity: value };
+      })
+    );
   }
 
   function setSelectedShapeFillColor(color: string) {
     if (selectedShapeIndex === null) return;
-    shapes = shapes.map((s, i) =>
-      i === selectedShapeIndex ? { ...s, fillColor: color } : s
+    setCurrentPageShapes((prev) =>
+      prev.map((s, i) => (i === selectedShapeIndex ? { ...s, fillColor: color } : s))
     );
     effectOptions = { ...effectOptions, fillColor: color };
   }
@@ -713,7 +928,7 @@
       canvas: canvasEl,
       imageSource,
       imageDimensions,
-      shapes,
+      shapes: currentPageShapes,
       tool,
       isDrawing,
       drawStart,
@@ -736,10 +951,10 @@
     const mod = e.metaKey || e.ctrlKey;
     if (e.key === "o") {
       e.preventDefault();
-      openImage();
+      openDocument();
     } else if (e.key === "s") {
       e.preventDefault();
-      if (imageSource) {
+      if (documentSource) {
         if (e.shiftKey) saveImageAs();
         else saveImage();
       }
@@ -776,10 +991,12 @@
   });
 
   function onDragOver(e: DragEvent) {
-    const hasImage = Array.from(e.dataTransfer?.items ?? []).some(
-      (item) => item.kind === "file" && isCompatibleImageType(item.type)
+    const hasFile = Array.from(e.dataTransfer?.items ?? []).some(
+      (item) =>
+        item.kind === "file" &&
+        (isCompatibleImageType(item.type) || item.type === "application/pdf")
     );
-    if (hasImage) {
+    if (hasFile) {
       e.preventDefault();
       e.dataTransfer!.dropEffect = "copy";
     }
@@ -787,13 +1004,20 @@
 
   async function onDrop(e: DragEvent) {
     const file = e.dataTransfer?.files?.[0];
-    if (!file || !isCompatibleImageType(file.type)) return;
+    if (!file) return;
+    const isPdf = file.type === "application/pdf";
+    if (!isCompatibleImageType(file.type) && !isPdf) return;
     e.preventDefault();
     try {
       const base64 = await fileToBase64(file);
-      await loadImageFromBytes(base64, file.name);
+      if (isPdf) {
+        openError = null;
+        await loadPdfFromBase64(base64, file.name, null);
+      } else {
+        await loadImageFromBytes(base64, file.name);
+      }
     } catch (_) {
-      openError = "Failed to load dropped image";
+      openError = "Failed to load dropped file";
     }
   }
 
@@ -814,18 +1038,26 @@
   ondragover={onDragOver}
   ondrop={onDrop}
   role="application"
-  aria-label="Redactorizer app; drop an image or paste to open"
+  aria-label="Redactorizer app; drop an image or PDF, or paste an image to open"
 >
   <Toolbar>
     <ToolbarGroup>
-      <Button title="Open image (⌘O)" onclick={openImage}>Open</Button>
+      <Button title="Open image or PDF (⌘O)" onclick={openDocument}>Open</Button>
       <Button
         title="Save (⌘S)"
         onclick={saveImage}
-        disabled={!imageSource}
+        disabled={!documentSource}
       >
         Save
       </Button>
+      {#if documentSource?.type === "pdf"}
+        <Button
+          title="Export all pages as PNGs"
+          onclick={exportAllPdfPages}
+        >
+          Export all
+        </Button>
+      {/if}
     </ToolbarGroup>
     <ToolbarGroup>
       <Button
@@ -894,10 +1126,10 @@
       <EffectOptionsComponent
         bind:effectOptions
         {selectedEffect}
-        fillColorValue={selectedShapeIndex != null && shapes[selectedShapeIndex]?.effect === "fill"
-          ? (shapes[selectedShapeIndex].fillColor ?? effectOptions.fillColor)
+        fillColorValue={selectedShapeIndex != null && currentPageShapes[selectedShapeIndex]?.effect === "fill"
+          ? (currentPageShapes[selectedShapeIndex].fillColor ?? effectOptions.fillColor)
           : undefined}
-        onFillColorChange={selectedShapeIndex != null && shapes[selectedShapeIndex]?.effect === "fill"
+        onFillColorChange={selectedShapeIndex != null && currentPageShapes[selectedShapeIndex]?.effect === "fill"
           ? setSelectedShapeFillColor
           : undefined}
       />
@@ -913,18 +1145,32 @@
     <p class="saved-toast" role="status">{savedToast}</p>
   {/if}
 
-  <div
-    class="canvas-wrap"
-    role="application"
-    aria-label="Image redaction canvas"
-    bind:this={canvasWrapEl}
-    onpointerenter={() => (mouseOverImage = true)}
-    onpointerleave={() => {
-      mouseOverImage = false;
-      hoveredShapeIndex = null;
-    }}
-  >
-    {#if imageSource}
+  <div class="main-content" class:with-sidebar={documentSource?.type === "pdf"}>
+    {#if documentSource?.type === "pdf"}
+      <PageSidebar
+        documentTitle={sourceFileName}
+        numPages={documentSource.numPages}
+        thumbnails={pdfThumbnails}
+        currentPageIndex={currentPageIndex}
+        onPageSelect={(i) => {
+          currentPageIndex = i;
+          selectedShapeIndex = null;
+          dragState = null;
+        }}
+      />
+    {/if}
+    <div
+      class="canvas-wrap"
+      role="application"
+      aria-label="Image redaction canvas"
+      bind:this={canvasWrapEl}
+      onpointerenter={() => (mouseOverImage = true)}
+      onpointerleave={() => {
+        mouseOverImage = false;
+        hoveredShapeIndex = null;
+      }}
+    >
+    {#if documentSource}
       <canvas
         bind:this={canvasEl}
         class="canvas"
@@ -958,7 +1204,7 @@
             canvasHeight={imageDimensions.height}
             overlayWidth={overlayRect.width}
             overlayHeight={overlayRect.height}
-            shapes={shapes}
+            shapes={currentPageShapes}
             selectedIndex={selectedShapeIndex}
             hoveredIndex={hoveredShapeIndex}
             showOutlines={mouseOverImage}
@@ -975,11 +1221,12 @@
       {/if}
     {:else}
       <Placeholder
-        message="Open an image to start redacting"
-        onAction={openImage}
-        actionLabel="Open image"
+        message="Open an image or PDF to start redacting"
+        onAction={openDocument}
+        actionLabel="Open"
       />
     {/if}
+    </div>
   </div>
 </main>
 
@@ -993,6 +1240,15 @@
     color: #1d1d1f;
     background: #f5f5f7;
     -webkit-font-smoothing: antialiased;
+  }
+  .main-content {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+  }
+  .main-content.with-sidebar {
+    flex-direction: row;
   }
   .canvas-wrap {
     position: relative;

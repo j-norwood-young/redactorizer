@@ -6,3 +6,4 @@ export { default as Placeholder } from "./Placeholder.svelte";
 export { default as LoadingIndicator } from "./LoadingIndicator.svelte";
 export { default as EffectOptions } from "./EffectOptions.svelte";
 export { default as ShapeOverlay } from "./ShapeOverlay.svelte";
+export { default as PageSidebar } from "./PageSidebar.svelte";

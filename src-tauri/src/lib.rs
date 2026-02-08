@@ -15,6 +15,14 @@ struct OpenImageResult {
     base64: String,
 }
 
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct OpenDocumentResult {
+    path: String,
+    base64: String,
+    format: String, // "image" | "pdf"
+}
+
 /// Decode image bytes (any format), re-encode as PNG with no metadata.
 fn sanitize_to_png(bytes: &[u8]) -> Result<Vec<u8>, String> {
     let img = image::load_from_memory(bytes).map_err(|e| e.to_string())?;
@@ -46,6 +54,40 @@ async fn open_image_dialog(app: tauri::AppHandle) -> Result<Option<OpenImageResu
     Ok(Some(OpenImageResult {
         path: path_str,
         base64: BASE64.encode(&png_bytes),
+    }))
+}
+
+/// Open a document (image or PDF) via file dialog. Returns path, base64, and format ("image" | "pdf").
+#[tauri::command(rename_all = "camelCase")]
+async fn open_document_dialog(app: tauri::AppHandle) -> Result<Option<OpenDocumentResult>, String> {
+    let path = app
+        .dialog()
+        .file()
+        .add_filter("Images & PDFs", &["png", "jpg", "jpeg", "gif", "webp", "bmp", "pdf"])
+        .blocking_pick_file();
+
+    let Some(file_path) = path else {
+        return Ok(None);
+    };
+
+    let path_buf = file_path.into_path().map_err(|e| e.to_string())?;
+    let path_str = path_buf
+        .to_str()
+        .ok_or("Invalid path")?
+        .to_string();
+    let bytes = fs::read(&path_buf).map_err(|e| e.to_string())?;
+
+    let (base64, format) = if path_str.to_lowercase().ends_with(".pdf") {
+        (BASE64.encode(&bytes), "pdf".to_string())
+    } else {
+        let png_bytes = sanitize_to_png(&bytes)?;
+        (BASE64.encode(&png_bytes), "image".to_string())
+    };
+
+    Ok(Some(OpenDocumentResult {
+        path: path_str,
+        base64,
+        format,
     }))
 }
 
@@ -83,6 +125,64 @@ async fn save_image(
         .unwrap_or(Err("Invalid path".to_string()))
 }
 
+/// Save multiple PNG images. Shows save dialog for the first file; writes the rest to the same directory with stem-2.png, stem-3.png, etc.
+#[tauri::command(rename_all = "camelCase")]
+async fn save_images_batch(
+    app: tauri::AppHandle,
+    base64_pngs: Vec<String>,
+    default_first_name: String,
+) -> Result<Option<String>, String> {
+    if base64_pngs.is_empty() {
+        return Ok(None);
+    }
+    let path = app
+        .dialog()
+        .file()
+        .add_filter("PNG image", &["png"])
+        .set_file_name(&default_first_name)
+        .blocking_save_file();
+    let Some(file_path) = path else {
+        return Ok(None);
+    };
+    let path_buf = file_path.into_path().map_err(|e| e.to_string())?;
+    let parent = path_buf.parent().ok_or("Invalid path")?;
+    let stem = path_buf
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("page")
+        .to_string();
+    // If stem ends with "-N" (e.g. "document-page-1"), use base "document-page" for subsequent files.
+    let base = if let Some(pos) = stem.rfind('-') {
+        let suffix = &stem[pos + 1..];
+        if suffix.chars().all(|c| c.is_ascii_digit()) {
+            stem[..pos].to_string()
+        } else {
+            stem
+        }
+    } else {
+        stem.clone()
+    };
+    let ext = path_buf
+        .extension()
+        .and_then(|s| s.to_str())
+        .unwrap_or("png");
+
+    for (i, base64_png) in base64_pngs.iter().enumerate() {
+        let bytes = BASE64.decode(base64_png.trim()).map_err(|e| e.to_string())?;
+        let png_bytes = sanitize_to_png(&bytes)?;
+        let name = if i == 0 {
+            path_buf.clone()
+        } else {
+            parent.join(format!("{}-{}.{}", base, i + 1, ext))
+        };
+        fs::write(&name, &png_bytes).map_err(|e| e.to_string())?;
+    }
+    path_buf
+        .to_str()
+        .map(|s| Ok(Some(s.to_string())))
+        .unwrap_or(Err("Invalid path".to_string()))
+}
+
 /// Load image from a file path (e.g. from OS drag-drop). Returns base64 PNG.
 #[tauri::command(rename_all = "camelCase")]
 async fn load_image_from_path(path: String) -> Result<(String, String), String> {
@@ -96,6 +196,29 @@ async fn load_image_from_path(path: String) -> Result<(String, String), String> 
         .unwrap_or("image.png")
         .to_string();
     Ok((base64, name))
+}
+
+/// Load document (image or PDF) from a file path (e.g. from OS drag-drop). Returns path, base64, format, and filename.
+#[tauri::command(rename_all = "camelCase")]
+async fn load_document_from_path(path: String) -> Result<OpenDocumentResult, String> {
+    let path_buf = Path::new(&path).to_path_buf();
+    let bytes = fs::read(&path_buf).map_err(|e| e.to_string())?;
+
+    let (base64, format) = if path.to_lowercase().ends_with(".pdf") {
+        (BASE64.encode(&bytes), "pdf".to_string())
+    } else {
+        let png_bytes = sanitize_to_png(&bytes)?;
+        (BASE64.encode(&png_bytes), "image".to_string())
+    };
+
+    Ok(OpenDocumentResult {
+        path: path_buf
+            .to_str()
+            .ok_or("Invalid path")?
+            .to_string(),
+        base64,
+        format,
+    })
 }
 
 /// Accept base64 of any supported image format; return sanitized PNG base64. For drop/paste.
@@ -195,8 +318,11 @@ pub fn run() {
         .plugin(tauri_plugin_share::init())
         .invoke_handler(tauri::generate_handler![
             open_image_dialog,
+            open_document_dialog,
             save_image,
+            save_images_batch,
             load_image_from_path,
+            load_document_from_path,
             any_image_to_png_base64,
             sanitize_image,
             write_temp_image,

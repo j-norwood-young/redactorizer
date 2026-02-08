@@ -380,3 +380,41 @@ export function redrawCanvas(params: RedrawParams): void {
   };
   img.src = src;
 }
+
+/** Parameters to render a static image + shapes to PNG (no drawing preview). */
+export interface RenderToPngParams {
+  imageSource: string;
+  imageDimensions: { width: number; height: number };
+  shapes: Shape[];
+  effectOptions: EffectOptions;
+}
+
+/** Render image + redaction shapes to an offscreen canvas and return PNG base64. */
+export function renderToPngBase64(params: RenderToPngParams): Promise<string> {
+  const { imageSource, imageDimensions, shapes, effectOptions } = params;
+  const { width, height } = imageDimensions;
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return Promise.reject(new Error("No 2d context"));
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => {
+      ctx.drawImage(img, 0, 0);
+      for (const s of shapes) {
+        const bounds = shapeBounds(s);
+        if (bounds.w <= 0 || bounds.h <= 0) continue;
+        ctx.save();
+        shapePath(ctx, s);
+        ctx.clip();
+        applyShapeEffect(ctx, s, img, bounds, effectOptions);
+        ctx.restore();
+      }
+      const dataUrl = canvas.toDataURL("image/png");
+      resolve(dataUrl.replace(/^data:image\/png;base64,/, ""));
+    };
+    img.onerror = () => reject(new Error("Failed to load image"));
+    img.src = imageSource;
+  });
+}
