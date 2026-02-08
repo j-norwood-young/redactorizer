@@ -5,6 +5,8 @@ use std::io::Cursor;
 use std::path::Path;
 use tauri::menu::{MenuBuilder, MenuItem, PredefinedMenuItem, SubmenuBuilder};
 use tauri::Emitter;
+#[cfg(not(target_os = "macos"))]
+use tauri::Manager;
 use tauri_plugin_dialog::DialogExt;
 #[cfg(not(target_os = "macos"))]
 use tauri_plugin_opener::OpenerExt;
@@ -370,12 +372,56 @@ pub fn run() {
                 .item(&paste_item)
                 .build()?;
 
+            // View submenu (Zoom + Full Screen)
+            let zoom_in_item =
+                MenuItem::with_id(app, "zoomIn", "Zoom In", true, Some("CmdOrCtrl+="))?;
+            let zoom_out_item =
+                MenuItem::with_id(app, "zoomOut", "Zoom Out", true, Some("CmdOrCtrl+-"))?;
+            let zoom_fit_item =
+                MenuItem::with_id(app, "zoomToFit", "Zoom to Fit", true, None::<&str>)?;
+            let zoom_reset_item =
+                MenuItem::with_id(app, "zoomReset", "Actual Size", true, Some("CmdOrCtrl+0"))?;
+            // Full screen: on macOS use native PredefinedMenuItem (single item, OS updates label).
+            // On Windows/Linux use a custom item and toggle in the handler.
+            #[cfg(target_os = "macos")]
+            let fullscreen_predefined = PredefinedMenuItem::fullscreen(app, None)?;
+            #[cfg(not(target_os = "macos"))]
+            let fullscreen_item =
+                MenuItem::with_id(app, "toggleFullscreen", "Enter Full Screen", true, None::<&str>)?;
+            let view_menu = {
+                let b = SubmenuBuilder::new(app, "View")
+                    .item(&zoom_in_item)
+                    .item(&zoom_out_item)
+                    .item(&zoom_fit_item)
+                    .item(&zoom_reset_item);
+                #[cfg(target_os = "macos")]
+                let b = b.item(&fullscreen_predefined);
+                #[cfg(not(target_os = "macos"))]
+                let b = b.item(&fullscreen_item);
+                b.build()?
+            };
+
             let menu = MenuBuilder::new(app)
-                .items(&[&app_menu, &file_menu, &edit_menu])
+                .items(&[&app_menu, &file_menu, &edit_menu, &view_menu])
                 .build()?;
             app.set_menu(menu)?;
+            #[cfg(not(target_os = "macos"))]
+            let fullscreen_item_handle = fullscreen_item.clone();
             app.on_menu_event(move |app_handle, event| {
                 let id = event.id().0.as_str();
+                #[cfg(not(target_os = "macos"))]
+                if id == "toggleFullscreen" {
+                    if let Some(w) = app_handle.get_webview_window("main") {
+                        let is_full = w.is_fullscreen().unwrap_or(false);
+                        if is_full {
+                            let _ = w.set_fullscreen(false);
+                            let _ = fullscreen_item_handle.set_text("Enter Full Screen");
+                        } else {
+                            let _ = w.set_fullscreen(true);
+                            let _ = fullscreen_item_handle.set_text("Exit Full Screen");
+                        }
+                    }
+                }
                 let _ = app_handle.emit("menu-action", id);
             });
             Ok(())

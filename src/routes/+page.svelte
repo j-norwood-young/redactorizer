@@ -11,6 +11,7 @@
     type ResizeHandle,
   } from "$lib/redactorCanvas";
   import { loadPdfDocument, renderPageToDataUrl, renderPageThumbnail, type PDFDocumentProxy } from "$lib/pdf";
+  import { ZoomIn, ZoomOut, Maximize2, Square, Circle, Pencil } from "@lucide/svelte";
   import {
     Button,
     Toolbar,
@@ -119,8 +120,99 @@
   let hoveredShapeIndex = $state<number | null>(null);
   let mouseOverImage = $state(false);
   let overlayRect = $state({ left: 0, top: 0, width: 0, height: 0 });
+  /** Zoom level for document view (1 = 100%). */
+  let zoomLevel = $state(1);
+  /** When non-null, user is editing the zoom % input; value is the string in the input. */
+  let zoomPercentInput = $state<string | null>(null);
+  /** For pinch gesture: zoom level at gesture start. */
+  let zoomAtGestureStart = $state(1);
   /** Shift key held — when drawing, constrains rectangle/ellipse to equal width/height. */
   let shiftKeyHeld = $state(false);
+
+  const ZOOM_MIN = 0.01;
+  const ZOOM_MAX = 3;
+  const ZOOM_LEVELS = [0.5, 0.75, 1, 1.25, 1.5, 2, 3];
+  function zoomIn() {
+    const i = ZOOM_LEVELS.indexOf(zoomLevel);
+    if (i < ZOOM_LEVELS.length - 1) zoomLevel = ZOOM_LEVELS[i + 1];
+    else if (zoomLevel < ZOOM_LEVELS[ZOOM_LEVELS.length - 1]) zoomLevel = Math.min(ZOOM_LEVELS[ZOOM_LEVELS.length - 1], zoomLevel + 0.25);
+  }
+  function zoomOut() {
+    const i = ZOOM_LEVELS.indexOf(zoomLevel);
+    if (i > 0) zoomLevel = ZOOM_LEVELS[i - 1];
+    else if (zoomLevel > ZOOM_LEVELS[0]) zoomLevel = Math.max(ZOOM_LEVELS[0], zoomLevel - 0.25);
+  }
+  function zoomReset() {
+    zoomLevel = 1;
+  }
+  /** Set zoom from a percentage number 0–300 (clamped). */
+  function setZoomFromPercent(percent: number) {
+    const clamped = Math.max(0, Math.min(300, percent));
+    zoomLevel = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, clamped / 100));
+  }
+  /** Commit the zoom % input: parse, clamp 0–300, apply and clear edit state. */
+  function commitZoomInput() {
+    if (zoomPercentInput === null) return;
+    const n = parseInt(zoomPercentInput, 10);
+    if (!Number.isNaN(n)) setZoomFromPercent(n);
+    zoomPercentInput = null;
+  }
+  /** Handle zoom via wheel (Cmd+scroll or trackpad pinch reported as ctrl+wheel). */
+  function handleZoomWheel(e: WheelEvent) {
+    if (!documentSource || !imageDimensions) return;
+    if (e.metaKey || e.ctrlKey) {
+      e.preventDefault();
+      const delta = -Math.sign(e.deltaY);
+      const factor = delta > 0 ? 1.1 : 0.9;
+      zoomLevel = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, zoomLevel * factor));
+    }
+  }
+  /** Handle Safari-style gesture events for pinch zoom. */
+  function handleGestureStart(e: Event) {
+    if (!documentSource) return;
+    const ev = e as unknown as { scale?: number };
+    zoomAtGestureStart = zoomLevel;
+  }
+  function handleGestureChange(e: Event) {
+    if (!documentSource) return;
+    e.preventDefault();
+    const ev = e as unknown as { scale?: number };
+    const scale = typeof ev.scale === "number" ? ev.scale : 1;
+    zoomLevel = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, zoomAtGestureStart * scale));
+  }
+  /** Zoom so the document fits in the visible canvas area. */
+  function zoomToFit() {
+    if (!imageDimensions || !canvasWrapEl) return;
+    const padding = 32;
+    const w = canvasWrapEl.clientWidth - padding;
+    const h = canvasWrapEl.clientHeight - padding;
+    if (w <= 0 || h <= 0) return;
+    const scale = Math.min(w / imageDimensions.width, h / imageDimensions.height);
+    zoomLevel = Math.max(0.25, Math.min(3, scale));
+  }
+  /** When a new document finishes loading, apply zoom-to-fit (once per document, not on PDF page change). */
+  let lastZoomFitDocKey = $state<string | null>(null);
+  $effect(() => {
+    const doc = documentSource;
+    const dims = imageDimensions;
+    const wrap = canvasWrapEl;
+    if (!doc || !dims || !wrap) return;
+    const docKey = doc.type === "pdf" ? doc.documentId : doc.dataUrl.slice(0, 100);
+    if (docKey === lastZoomFitDocKey) return;
+    lastZoomFitDocKey = docKey;
+    requestAnimationFrame(() => {
+      zoomToFit();
+    });
+  });
+  $effect(() => {
+    if (!documentSource) lastZoomFitDocKey = null;
+  });
+  /** Display size of the overlay (canvas) in pixels when zoomed. */
+  let overlayDisplaySize = $derived(
+    imageDimensions
+      ? { width: imageDimensions.width * zoomLevel, height: imageDimensions.height * zoomLevel }
+      : { width: 0, height: 0 }
+  );
 
   type DragState =
     | { type: "move"; shapeIndex: number; startX: number; startY: number; startPoints: number[] }
@@ -174,6 +266,7 @@
       if (!result) return;
       if (result.format === "image") {
         const dataUrl = `data:image/png;base64,${result.base64}`;
+        imageDimensions = null;
         imageSource = dataUrl;
         documentSource = { type: "image", dataUrl };
         pdfDocRef = null;
@@ -202,6 +295,7 @@
         base64Any,
       });
       const dataUrl = `data:image/png;base64,${pngBase64}`;
+      imageDimensions = null;
       imageSource = dataUrl;
       documentSource = { type: "image", dataUrl };
       sourceFilePath = null;
@@ -225,6 +319,7 @@
         path: filePath,
       });
       const dataUrl = `data:image/png;base64,${base64}`;
+      imageDimensions = null;
       imageSource = dataUrl;
       documentSource = { type: "image", dataUrl };
       sourceFilePath = null;
@@ -251,6 +346,7 @@
       const name = result.path.split(/[/\\]/).pop() ?? "document";
       if (result.format === "image") {
         const dataUrl = `data:image/png;base64,${result.base64}`;
+        imageDimensions = null;
         imageSource = dataUrl;
         documentSource = { type: "image", dataUrl };
         pdfDocRef = null;
@@ -282,6 +378,7 @@
         return;
       }
       const dataUrl = `data:image/png;base64,${base64}`;
+      imageDimensions = null;
       imageSource = dataUrl;
       documentSource = { type: "image", dataUrl };
       sourceFilePath = null;
@@ -333,6 +430,20 @@
     ro.observe(canvas);
     ro.observe(wrap);
     return () => ro.disconnect();
+  });
+
+  /** Cmd+scroll / pinch zoom (wheel) and Safari gesture events. */
+  $effect(() => {
+    const wrap = canvasWrapEl;
+    if (!wrap) return;
+    wrap.addEventListener("wheel", handleZoomWheel, { passive: false });
+    wrap.addEventListener("gesturestart", handleGestureStart);
+    wrap.addEventListener("gesturechange", handleGestureChange);
+    return () => {
+      wrap.removeEventListener("wheel", handleZoomWheel);
+      wrap.removeEventListener("gesturestart", handleGestureStart);
+      wrap.removeEventListener("gesturechange", handleGestureChange);
+    };
   });
 
   function drawImageOnCanvas(img: HTMLImageElement) {
@@ -573,6 +684,18 @@
           break;
         case "paste":
           pasteImage();
+          break;
+        case "zoomIn":
+          if (documentSource) zoomIn();
+          break;
+        case "zoomOut":
+          if (documentSource) zoomOut();
+          break;
+        case "zoomToFit":
+          if (documentSource) zoomToFit();
+          break;
+        case "zoomReset":
+          if (documentSource) zoomReset();
           break;
       }
     }).then((fn) => {
@@ -949,6 +1072,21 @@
       return;
     }
     const mod = e.metaKey || e.ctrlKey;
+    if (mod && (e.key === "=" || e.key === "+")) {
+      e.preventDefault();
+      if (documentSource) zoomIn();
+      return;
+    }
+    if (mod && e.key === "-") {
+      e.preventDefault();
+      if (documentSource) zoomOut();
+      return;
+    }
+    if (mod && e.key === "0") {
+      e.preventDefault();
+      if (documentSource) zoomReset();
+      return;
+    }
     if (e.key === "o") {
       e.preventDefault();
       openDocument();
@@ -1065,34 +1203,21 @@
         active={tool === "rectangle"}
         onclick={() => (tool = "rectangle")}
       >
-        <span class="shape-icon" aria-hidden="true">
-          <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <rect x="3" y="3" width="18" height="18" rx="1" />
-          </svg>
-        </span>
+        <span class="shape-icon"><Square size={18} aria-hidden="true" /></span>
       </Button>
       <Button
         title="Ellipse (hold Shift for circle)"
         active={tool === "ellipse"}
         onclick={() => (tool = "ellipse")}
       >
-        <span class="shape-icon" aria-hidden="true">
-          <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <ellipse cx="12" cy="12" rx="10" ry="6" />
-          </svg>
-        </span>
+        <span class="shape-icon"><Circle size={18} aria-hidden="true" /></span>
       </Button>
       <Button
         title="Freehand"
         active={tool === "freehand"}
         onclick={() => (tool = "freehand")}
       >
-        <span class="shape-icon" aria-hidden="true">
-          <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M12 19l7-7 3 3-7 7-3-3z" />
-            <path d="M18 13l-1.5-7.5L2 2l3.5 14.5L13 18l5-5z" />
-          </svg>
-        </span>
+        <span class="shape-icon"><Pencil size={18} aria-hidden="true" /></span>
       </Button>
     </ToolbarGroup>
     <ToolbarGroup>
@@ -1134,6 +1259,65 @@
           : undefined}
       />
     </ToolbarGroup>
+    {#if documentSource}
+      <div class="toolbar-spacer" aria-hidden="true"></div>
+      <ToolbarGroup>
+        <Button
+          title="Zoom to fit"
+          onclick={zoomToFit}
+        >
+          <Maximize2 size={18} aria-hidden="true" />
+        </Button>
+        <Button
+          title="Zoom out (⌘−)"
+          onclick={zoomOut}
+          disabled={zoomLevel <= ZOOM_LEVELS[0]}
+        >
+          <ZoomOut size={18} aria-hidden="true" />
+        </Button>
+        <label class="zoom-percent-wrap" title="Zoom level (0–300%); click to edit. ⌘0 resets to 100%">
+          <span class="visually-hidden">Zoom level, percent</span>
+          <input
+            type="number"
+            class="zoom-percent-input"
+            min={0}
+            max={300}
+            step={1}
+            value={zoomPercentInput ?? Math.round(zoomLevel * 100)}
+            onfocus={(e) => {
+              if (zoomPercentInput === null) zoomPercentInput = String(Math.round(zoomLevel * 100));
+              const el = e.currentTarget as HTMLInputElement;
+              requestAnimationFrame(() => el?.select());
+            }}
+            onblur={commitZoomInput}
+            onkeydown={(e) => {
+              if (e.key === "Enter") {
+                e.preventDefault();
+                commitZoomInput();
+                (e.currentTarget as HTMLInputElement).blur();
+              }
+              if (e.key === "Escape") {
+                zoomPercentInput = null;
+                (e.currentTarget as HTMLInputElement).blur();
+              }
+            }}
+            oninput={(e) => {
+              const v = (e.currentTarget as HTMLInputElement).value;
+              if (v === "" || v === "-") return;
+              zoomPercentInput = v;
+            }}
+          />
+          <span class="zoom-percent-suffix">%</span>
+        </label>
+        <Button
+          title="Zoom in (⌘+)"
+          onclick={zoomIn}
+          disabled={zoomLevel >= ZOOM_LEVELS[ZOOM_LEVELS.length - 1]}
+        >
+          <ZoomIn size={18} aria-hidden="true" />
+        </Button>
+      </ToolbarGroup>
+    {/if}
   </Toolbar>
 
   <ErrorMessage message={openError} />
@@ -1161,6 +1345,7 @@
     {/if}
     <div
       class="canvas-wrap"
+      class:empty-state={!documentSource}
       role="application"
       aria-label="Image redaction canvas"
       bind:this={canvasWrapEl}
@@ -1171,39 +1356,45 @@
       }}
     >
     {#if documentSource}
-      <canvas
-        bind:this={canvasEl}
-        class="canvas"
-        class:canvas-loading={!imageDimensions}
-        onmousedown={pointerDown}
-        onmousemove={pointerMove}
-        onmouseup={pointerUp}
-        onmouseleave={pointerUp}
-      ></canvas>
-      {#if !imageDimensions}
-        <div class="image-loading-overlay" aria-busy="true">
-          <LoadingIndicator message="Loading image…" size="large" />
-        </div>
-      {/if}
-      {#if imageDimensions && overlayRect.width > 0 && overlayRect.height > 0}
-        <div
-          class="overlay-wrapper"
-          role="presentation"
-          style="left: {overlayRect.left}px; top: {overlayRect.top}px; width: {overlayRect.width}px; height: {overlayRect.height}px;"
-          onpointerdown={(e) => {
-            const t = e.target as Element;
-            if (t.closest?.(".shape-path") || t.closest?.(".handle") || t.closest?.(".toolbar-inner")) return;
-            pointerDown(e as unknown as MouseEvent);
-          }}
-          onpointermove={pointerMove}
-          onpointerup={pointerUp}
-          onpointerleave={pointerUp}
-        >
-          <ShapeOverlay
-            canvasWidth={imageDimensions.width}
-            canvasHeight={imageDimensions.height}
-            overlayWidth={overlayRect.width}
-            overlayHeight={overlayRect.height}
+      <div class="canvas-wrap-inner">
+      <div
+        class="zoom-inner"
+        style={imageDimensions
+          ? `width: ${imageDimensions.width * zoomLevel}px; height: ${imageDimensions.height * zoomLevel}px;`
+          : "min-width: 100%; min-height: 240px;"}
+      >
+        <canvas
+          bind:this={canvasEl}
+          class="canvas"
+          class:canvas-loading={!imageDimensions}
+          onmousedown={pointerDown}
+          onmousemove={pointerMove}
+          onmouseup={pointerUp}
+          onmouseleave={pointerUp}
+        ></canvas>
+        {#if !imageDimensions}
+          <div class="image-loading-overlay" aria-busy="true">
+            <LoadingIndicator message="Loading image…" size="large" />
+          </div>
+        {/if}
+        {#if imageDimensions && overlayDisplaySize.width > 0 && overlayDisplaySize.height > 0}
+          <div
+            class="overlay-wrapper"
+            role="presentation"
+            onpointerdown={(e) => {
+              const t = e.target as Element;
+              if (t.closest?.(".shape-path") || t.closest?.(".handle") || t.closest?.(".toolbar-inner")) return;
+              pointerDown(e as unknown as MouseEvent);
+            }}
+            onpointermove={pointerMove}
+            onpointerup={pointerUp}
+            onpointerleave={pointerUp}
+          >
+            <ShapeOverlay
+              canvasWidth={imageDimensions.width}
+              canvasHeight={imageDimensions.height}
+              overlayWidth={overlayDisplaySize.width}
+              overlayHeight={overlayDisplaySize.height}
             shapes={currentPageShapes}
             selectedIndex={selectedShapeIndex}
             hoveredIndex={hoveredShapeIndex}
@@ -1219,6 +1410,8 @@
           />
         </div>
       {/if}
+      </div>
+      </div>
     {:else}
       <Placeholder
         message="Open an image or PDF to start redacting"
@@ -1254,10 +1447,39 @@
     position: relative;
     flex: 1;
     overflow: auto;
+    padding: 16px;
+    min-height: 0;
+  }
+  .canvas-wrap.empty-state {
     display: flex;
     align-items: center;
     justify-content: center;
-    padding: 16px;
+  }
+  .canvas-wrap-inner {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 100%;
+    min-height: 100%;
+  }
+  .zoom-inner {
+    position: relative;
+    flex-shrink: 0;
+    margin: auto;
+  }
+  .toolbar-spacer {
+    flex: 1;
+    min-width: 0;
+  }
+  .zoom-inner .canvas {
+    width: 100%;
+    height: 100%;
+    max-width: none;
+    max-height: none;
+  }
+  .zoom-inner .overlay-wrapper {
+    position: absolute;
+    inset: 0;
   }
   .image-loading-overlay {
     position: absolute;
@@ -1270,6 +1492,7 @@
   }
   .overlay-wrapper {
     position: absolute;
+    /* when not inside .zoom-inner, positioned via inline style from overlayRect */
   }
   .canvas {
     display: block;
@@ -1289,6 +1512,62 @@
   }
   .shape-icon :global(svg) {
     display: block;
+  }
+  .visually-hidden {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+  }
+  .zoom-percent-wrap {
+    display: inline-flex;
+    align-items: center;
+    min-width: 2.5em;
+    font-variant-numeric: tabular-nums;
+    background: #fff;
+    border: 1px solid rgba(0, 0, 0, 0.15);
+    border-radius: 6px;
+    padding: 6px 8px;
+    height: 32px;
+    box-sizing: border-box;
+  }
+  .zoom-percent-wrap:hover {
+    background: #f0f0f0;
+  }
+  .zoom-percent-wrap:focus-within {
+    outline: 2px solid #007aff;
+    outline-offset: 2px;
+  }
+  .zoom-percent-input {
+    width: 2.2em;
+    min-width: 0;
+    padding: 0;
+    border: none;
+    background: none;
+    font: inherit;
+    color: inherit;
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+    appearance: textfield;
+    -moz-appearance: textfield;
+  }
+  .zoom-percent-input::-webkit-outer-spin-button,
+  .zoom-percent-input::-webkit-inner-spin-button {
+    appearance: none;
+    -webkit-appearance: none;
+    margin: 0;
+  }
+  .zoom-percent-input:focus {
+    outline: none;
+  }
+  .zoom-percent-suffix {
+    margin-left: 1px;
+    opacity: 0.8;
   }
   .saved-toast {
     position: fixed;
@@ -1326,6 +1605,16 @@
     .saved-toast {
       background: #f5f5f7;
       color: #1d1d1f;
+    }
+    .zoom-percent-wrap {
+      background: #2d2d30;
+      border-color: rgba(255, 255, 255, 0.2);
+    }
+    .zoom-percent-wrap:hover {
+      background: #3a3a3c;
+    }
+    .zoom-percent-wrap:focus-within {
+      outline-color: #0a84ff;
     }
   }
 </style>
