@@ -1,16 +1,29 @@
 <script lang="ts">
   import type { EffectType, EffectOptions as EffectOptionsType } from "$lib/types/redactor";
 
-  let { selectedEffect, effectOptions = $bindable() } = $props<{
+  let {
+    selectedEffect,
+    effectOptions = $bindable(),
+    fillColorValue,
+    onFillColorChange,
+  } = $props<{
     selectedEffect: EffectType;
     effectOptions: EffectOptionsType;
+    /** When set (e.g. when editing a shape with fill), use this value and callback instead of effectOptions.fillColor. */
+    fillColorValue?: string;
+    onFillColorChange?: (color: string) => void;
   }>();
 </script>
 
 {#if selectedEffect === "fill"}
   <input
     type="color"
-    bind:value={effectOptions.fillColor}
+    value={fillColorValue ?? effectOptions.fillColor}
+    oninput={(e) => {
+      const v = (e.currentTarget as HTMLInputElement).value;
+      if (onFillColorChange) onFillColorChange(v);
+      else effectOptions = { ...effectOptions, fillColor: v };
+    }}
     class="color-picker"
     title="Fill colour"
   />
