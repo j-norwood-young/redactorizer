@@ -10,8 +10,14 @@
     renderToPngBase64,
     type ResizeHandle,
   } from "$lib/redactorCanvas";
-  import { loadPdfDocument, renderPageToDataUrl, renderPageThumbnail, type PDFDocumentProxy } from "$lib/pdf";
-  import { ZoomIn, ZoomOut, Maximize2, Square, Circle, Pencil } from "@lucide/svelte";
+  import {
+    loadPdfDocument,
+    renderPageToDataUrl,
+    renderPageThumbnail,
+    createPdfFromPageImages,
+    type PDFDocumentProxy,
+  } from "$lib/pdf";
+  import { ZoomIn, ZoomOut, Maximize2, Square, Circle, Pencil, ChevronDown } from "@lucide/svelte";
   import {
     Button,
     Toolbar,
@@ -26,6 +32,8 @@
 
   let canvasEl = $state<HTMLCanvasElement | null>(null);
   let canvasWrapEl = $state<HTMLDivElement | null>(null);
+  /** Overlay wrapper (canvas area); focusable so we can pull focus here after drawing to avoid toolbar stealing it. */
+  let overlayWrapperEl = $state<HTMLDivElement | null>(null);
   let imageSource = $state<string | null>(null);
   let imageDimensions = $state<{ width: number; height: number } | null>(null);
   /** Full path when opened via dialog; null when pasted or dropped. */
@@ -66,6 +74,8 @@
   let openError = $state<string | null>(null);
   let copyError = $state<string | null>(null);
   let shareError = $state<string | null>(null);
+  let exportDropdownOpen = $state(false);
+  let exportDropdownWrapEl = $state<HTMLDivElement | null>(null);
 
   const COMPATIBLE_IMAGE_TYPES = [
     "image/png",
@@ -131,16 +141,25 @@
 
   const ZOOM_MIN = 0.01;
   const ZOOM_MAX = 3;
-  const ZOOM_LEVELS = [0.5, 0.75, 1, 1.25, 1.5, 2, 3];
+  /** Zoom step size: 5% below 50%, 10% up to 100%, 25% above 100%. */
+  function zoomStep(level: number): number {
+    if (level < 0.5) return 0.05;
+    if (level <= 1) return 0.1;
+    return 0.25;
+  }
+  /** Snap to nearest step grid (5% / 10% / 25% by range). */
+  function snapZoom(v: number): number {
+    if (v < 0.5) return Math.round(v * 20) / 20;
+    if (v <= 1) return Math.round(v * 10) / 10;
+    return Math.round(v * 4) / 4;
+  }
   function zoomIn() {
-    const i = ZOOM_LEVELS.indexOf(zoomLevel);
-    if (i < ZOOM_LEVELS.length - 1) zoomLevel = ZOOM_LEVELS[i + 1];
-    else if (zoomLevel < ZOOM_LEVELS[ZOOM_LEVELS.length - 1]) zoomLevel = Math.min(ZOOM_LEVELS[ZOOM_LEVELS.length - 1], zoomLevel + 0.25);
+    const next = snapZoom(zoomLevel + zoomStep(zoomLevel));
+    zoomLevel = Math.min(ZOOM_MAX, next);
   }
   function zoomOut() {
-    const i = ZOOM_LEVELS.indexOf(zoomLevel);
-    if (i > 0) zoomLevel = ZOOM_LEVELS[i - 1];
-    else if (zoomLevel > ZOOM_LEVELS[0]) zoomLevel = Math.max(ZOOM_LEVELS[0], zoomLevel - 0.25);
+    const next = snapZoom(zoomLevel - zoomStep(zoomLevel));
+    zoomLevel = Math.max(ZOOM_MIN, next);
   }
   function zoomReset() {
     zoomLevel = 1;
@@ -188,7 +207,7 @@
     const h = canvasWrapEl.clientHeight - padding;
     if (w <= 0 || h <= 0) return;
     const scale = Math.min(w / imageDimensions.width, h / imageDimensions.height);
-    zoomLevel = Math.max(0.25, Math.min(3, scale));
+    zoomLevel = Math.max(0.1, Math.min(3, scale));
   }
   /** When a new document finishes loading, apply zoom-to-fit (once per document, not on PDF page change). */
   let lastZoomFitDocKey = $state<string | null>(null);
@@ -432,6 +451,15 @@
     return () => ro.disconnect();
   });
 
+  /** When switching PDF page, scroll the canvas to the top of the new page. */
+  $effect(() => {
+    const _page = currentPageIndex;
+    const wrap = canvasWrapEl;
+    if (!wrap) return;
+    wrap.scrollTop = 0;
+    wrap.scrollLeft = 0;
+  });
+
   /** Cmd+scroll / pinch zoom (wheel) and Safari gesture events. */
   $effect(() => {
     const wrap = canvasWrapEl;
@@ -617,44 +645,82 @@
     }
   }
 
+  /** Build redacted PNG base64 and dimensions for every PDF page (shared by PDF and PNG export). */
+  async function buildRedactedPdfPages(): Promise<
+    { base64Png: string; width: number; height: number }[]
+  > {
+    const doc = documentSource;
+    if (doc?.type !== "pdf" || !pdfDocRef) return [];
+    const numPages = doc.numPages;
+    const result: { base64Png: string; width: number; height: number }[] = [];
+    for (let i = 0; i < numPages; i++) {
+      const shapes = shapesByPage[i] ?? [];
+      let imageSourcePage: string;
+      let imageDimensionsPage: { width: number; height: number };
+      if (i === currentPageIndex && imageSource && imageDimensions) {
+        imageSourcePage = imageSource;
+        imageDimensionsPage = imageDimensions;
+      } else {
+        const page = await pdfDocRef.getPage(i + 1);
+        imageSourcePage = await renderPageToDataUrl(page, PDF_PAGE_SCALE);
+        const img = new Image();
+        imageDimensionsPage = await new Promise((resolve, reject) => {
+          img.onload = () => resolve({ width: img.naturalWidth, height: img.naturalHeight });
+          img.onerror = () => reject(new Error("Failed to load page image"));
+          img.src = imageSourcePage;
+        });
+      }
+      const base64 = await renderToPngBase64({
+        imageSource: imageSourcePage,
+        imageDimensions: imageDimensionsPage,
+        shapes,
+        effectOptions,
+      });
+      const w = Number(imageDimensionsPage.width);
+      const h = Number(imageDimensionsPage.height);
+      result.push({
+        base64Png: base64,
+        width: Number.isFinite(w) && w > 0 ? w : 612,
+        height: Number.isFinite(h) && h > 0 ? h : 792,
+      });
+    }
+    return result;
+  }
+
+  /** Export all PDF pages as a single redaction-safe PDF. */
+  async function exportAllPdfAsPdf() {
+    if (documentSource?.type !== "pdf" || !pdfDocRef) return;
+    saveError = null;
+    const lastDot = sourceFileName.lastIndexOf(".");
+    const stem = lastDot > 0 ? sourceFileName.slice(0, lastDot) : sourceFileName || "document";
+    const defaultName = `${stem}-redacted.pdf`;
+    try {
+      const pages = await buildRedactedPdfPages();
+      if (pages.length === 0) return;
+      const base64Pdf = await createPdfFromPageImages(pages);
+      const path = await invoke<string | null>("save_pdf", {
+        base64Pdf,
+        overwritePath: null,
+        defaultName,
+      });
+      if (path) showSavedToast(path);
+    } catch (e) {
+      saveError = e instanceof Error ? e.message : String(e);
+    }
+  }
+
   /** Export all PDF pages as PNGs (one save dialog, then batch write). */
   async function exportAllPdfPages() {
-    const doc = documentSource;
-    if (doc?.type !== "pdf" || !pdfDocRef) return;
+    if (documentSource?.type !== "pdf" || !pdfDocRef) return;
     saveError = null;
-    const numPages = doc.numPages;
     const lastDot = sourceFileName.lastIndexOf(".");
     const stem = lastDot > 0 ? sourceFileName.slice(0, lastDot) : sourceFileName || "document";
     const defaultFirstName = `${stem}-page-1.png`;
     try {
-      const base64s: string[] = [];
-      for (let i = 0; i < numPages; i++) {
-        const shapes = shapesByPage[i] ?? [];
-        let imageSourcePage: string;
-        let imageDimensionsPage: { width: number; height: number };
-        if (i === currentPageIndex && imageSource && imageDimensions) {
-          imageSourcePage = imageSource;
-          imageDimensionsPage = imageDimensions;
-        } else {
-          const page = await pdfDocRef.getPage(i + 1);
-          imageSourcePage = await renderPageToDataUrl(page, PDF_PAGE_SCALE);
-          const img = new Image();
-          imageDimensionsPage = await new Promise((resolve, reject) => {
-            img.onload = () => resolve({ width: img.naturalWidth, height: img.naturalHeight });
-            img.onerror = () => reject(new Error("Failed to load page image"));
-            img.src = imageSourcePage;
-          });
-        }
-        const base64 = await renderToPngBase64({
-          imageSource: imageSourcePage,
-          imageDimensions: imageDimensionsPage,
-          shapes,
-          effectOptions,
-        });
-        base64s.push(base64);
-      }
+      const pages = await buildRedactedPdfPages();
+      if (pages.length === 0) return;
       const path = await invoke<string | null>("save_images_batch", {
-        base64Pngs: base64s,
+        base64Pngs: pages.map((p) => p.base64Png),
         defaultFirstName,
       });
       if (path) showSavedToast(path);
@@ -681,6 +747,12 @@
           break;
         case "share":
           shareImage();
+          break;
+        case "exportPdf":
+          exportAllPdfAsPdf();
+          break;
+        case "exportPng":
+          exportAllPdfPages();
           break;
         case "paste":
           pasteImage();
@@ -938,8 +1010,10 @@
       const x = x0 < x1 ? x0 : x0 - w;
       const y = y0 < y1 ? y0 : y0 - h;
       if (w >= 2 && h >= 2) {
+        const prevLen = (shapesByPage[currentPageIndex] ?? []).length;
         setCurrentPageShapes((prev) => [...prev, { type: "rectangle", points: [x, y, w, h], effect: selectedEffect }]);
-        selectedShapeIndex = currentPageShapes.length;
+        selectedShapeIndex = prevLen;
+        returnFocusToCanvas();
       }
     } else if (tool === "ellipse" || tool === "circle") {
       let w = Math.abs(x1 - x0);
@@ -952,17 +1026,32 @@
       const x = x0 < x1 ? x0 : x0 - w;
       const y = y0 < y1 ? y0 : y0 - h;
       if (w >= 2 && h >= 2) {
+        const prevLen = (shapesByPage[currentPageIndex] ?? []).length;
         setCurrentPageShapes((prev) => [...prev, { type: "ellipse", points: [x, y, w, h], effect: selectedEffect }]);
-        selectedShapeIndex = currentPageShapes.length;
+        selectedShapeIndex = prevLen;
+        returnFocusToCanvas();
       }
     } else if (tool === "freehand" && freehandPoints.length >= 4) {
+      const prevLen = (shapesByPage[currentPageIndex] ?? []).length;
       setCurrentPageShapes((prev) => [...prev, { type: "freehand", points: [...freehandPoints], effect: selectedEffect }]);
-      selectedShapeIndex = currentPageShapes.length;
+      selectedShapeIndex = prevLen;
+      returnFocusToCanvas();
     }
     isDrawing = false;
     drawStart = null;
     drawCurrent = null;
     freehandPoints = [];
+  }
+
+  /** After adding a shape, move focus to the canvas area so the new toolbar doesn't steal focus (text caret / can't draw again). */
+  function returnFocusToCanvas() {
+    requestAnimationFrame(() => {
+      const wrapper = overlayWrapperEl ?? canvasWrapEl;
+      if (wrapper && typeof wrapper.focus === "function") {
+        (document.activeElement as HTMLElement | null)?.blur?.();
+        wrapper.focus({ preventScroll: true });
+      }
+    });
   }
 
   function pointerDown(e: MouseEvent) {
@@ -1169,6 +1258,19 @@
     document.addEventListener("paste", onPaste);
     return () => document.removeEventListener("paste", onPaste);
   });
+
+  $effect(() => {
+    if (!exportDropdownOpen || typeof document === "undefined") return;
+    const wrap = exportDropdownWrapEl;
+    const close = (e: MouseEvent) => {
+      if (wrap && !wrap.contains(e.target as Node)) exportDropdownOpen = false;
+    };
+    const id = setTimeout(() => document.addEventListener("click", close), 0);
+    return () => {
+      clearTimeout(id);
+      document.removeEventListener("click", close);
+    };
+  });
 </script>
 
 <main
@@ -1189,12 +1291,44 @@
         Save
       </Button>
       {#if documentSource?.type === "pdf"}
-        <Button
-          title="Export all pages as PNGs"
-          onclick={exportAllPdfPages}
+        <div
+          class="export-dropdown-wrap"
+          bind:this={exportDropdownWrapEl}
         >
-          Export all
-        </Button>
+          <Button
+            title="Export all pages (choose format in dropdown)"
+            onclick={() => (exportDropdownOpen = !exportDropdownOpen)}
+          >
+            Export
+            <ChevronDown size={16} aria-hidden="true" class="export-chevron" />
+          </Button>
+          {#if exportDropdownOpen}
+            <div class="export-dropdown-menu" role="menu">
+              <button
+                type="button"
+                class="export-dropdown-item"
+                role="menuitem"
+                onclick={() => {
+                  exportDropdownOpen = false;
+                  exportAllPdfAsPdf();
+                }}
+              >
+                PDF
+              </button>
+              <button
+                type="button"
+                class="export-dropdown-item"
+                role="menuitem"
+                onclick={() => {
+                  exportDropdownOpen = false;
+                  exportAllPdfPages();
+                }}
+              >
+                PNG
+              </button>
+            </div>
+          {/if}
+        </div>
       {/if}
     </ToolbarGroup>
     <ToolbarGroup>
@@ -1271,7 +1405,7 @@
         <Button
           title="Zoom out (⌘−)"
           onclick={zoomOut}
-          disabled={zoomLevel <= ZOOM_LEVELS[0]}
+          disabled={zoomLevel <= ZOOM_MIN}
         >
           <ZoomOut size={18} aria-hidden="true" />
         </Button>
@@ -1312,7 +1446,7 @@
         <Button
           title="Zoom in (⌘+)"
           onclick={zoomIn}
-          disabled={zoomLevel >= ZOOM_LEVELS[ZOOM_LEVELS.length - 1]}
+          disabled={zoomLevel >= ZOOM_MAX}
         >
           <ZoomIn size={18} aria-hidden="true" />
         </Button>
@@ -1381,6 +1515,8 @@
           <div
             class="overlay-wrapper"
             role="presentation"
+            tabindex="-1"
+            bind:this={overlayWrapperEl}
             onpointerdown={(e) => {
               const t = e.target as Element;
               if (t.closest?.(".shape-path") || t.closest?.(".handle") || t.closest?.(".toolbar-inner")) return;
@@ -1470,6 +1606,60 @@
   .toolbar-spacer {
     flex: 1;
     min-width: 0;
+  }
+  .export-dropdown-wrap {
+    position: relative;
+    display: inline-flex;
+  }
+  .export-dropdown-wrap :global(.btn) {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+  }
+  .export-dropdown-wrap :global(.export-chevron) {
+    flex-shrink: 0;
+    opacity: 0.8;
+  }
+  .export-dropdown-menu {
+    position: absolute;
+    top: 100%;
+    left: 0;
+    margin-top: 4px;
+    min-width: 120px;
+    padding: 4px 0;
+    background: #fff;
+    border: 1px solid rgba(0, 0, 0, 0.12);
+    border-radius: 6px;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+    z-index: 100;
+  }
+  .export-dropdown-item {
+    display: block;
+    width: 100%;
+    padding: 8px 12px;
+    border: 0;
+    background: none;
+    font: inherit;
+    font-size: 13px;
+    color: #1d1d1f;
+    text-align: left;
+    cursor: pointer;
+  }
+  .export-dropdown-item:hover {
+    background: #f0f0f0;
+  }
+  @media (prefers-color-scheme: dark) {
+    .export-dropdown-menu {
+      background: #2d2d30;
+      border-color: rgba(255, 255, 255, 0.2);
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+    }
+    .export-dropdown-item {
+      color: #f5f5f7;
+    }
+    .export-dropdown-item:hover {
+      background: #3a3a3c;
+    }
   }
   .zoom-inner .canvas {
     width: 100%;

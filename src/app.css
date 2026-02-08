@@ -4,4 +4,14 @@ body {
   margin: 0;
   padding: 0;
   background: #f5f5f7;
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro", "Segoe UI", Roboto, sans-serif;
+  font-size: 13px;
+  color: #1d1d1f;
+  -webkit-font-smoothing: antialiased;
+}
+@media (prefers-color-scheme: dark) {
+  body {
+    background: #1d1d1f;
+    color: #f5f5f7;
+  }
 }

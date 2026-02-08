@@ -8,12 +8,15 @@
 <style>
   .toolbar {
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
-    gap: 12px;
+    align-content: center;
+    gap: 8px 12px;
     padding: 10px 16px;
     background: rgba(255, 255, 255, 0.8);
     border-bottom: 1px solid rgba(0, 0, 0, 0.08);
     flex-shrink: 0;
+    min-height: 44px;
   }
   @media (prefers-color-scheme: dark) {
     .toolbar {

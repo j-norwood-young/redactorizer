@@ -8,7 +8,6 @@ use tauri::Emitter;
 #[cfg(not(target_os = "macos"))]
 use tauri::Manager;
 use tauri_plugin_dialog::DialogExt;
-#[cfg(not(target_os = "macos"))]
 use tauri_plugin_opener::OpenerExt;
 
 #[derive(serde::Serialize)]
@@ -121,6 +120,39 @@ async fn save_image(
     };
 
     fs::write(&path_buf, &png_bytes).map_err(|e| e.to_string())?;
+    path_buf
+        .to_str()
+        .map(|s| Ok(Some(s.to_string())))
+        .unwrap_or(Err("Invalid path".to_string()))
+}
+
+/// Save a single PDF file. When overwrite_path is set, write there (no dialog). Otherwise show save dialog.
+/// Returns the path written to, or None if the user cancelled the dialog.
+#[tauri::command(rename_all = "camelCase")]
+async fn save_pdf(
+    app: tauri::AppHandle,
+    base64_pdf: String,
+    overwrite_path: Option<String>,
+    default_name: Option<String>,
+) -> Result<Option<String>, String> {
+    let bytes = BASE64.decode(base64_pdf.trim()).map_err(|e| e.to_string())?;
+
+    let path_buf = if let Some(ref p) = overwrite_path {
+        Path::new(p).to_path_buf()
+    } else {
+        let path = app
+            .dialog()
+            .file()
+            .add_filter("PDF document", &["pdf"])
+            .set_file_name(default_name.as_deref().unwrap_or("redacted.pdf"))
+            .blocking_save_file();
+        let Some(file_path) = path else {
+            return Ok(None);
+        };
+        file_path.into_path().map_err(|e| e.to_string())?
+    };
+
+    fs::write(&path_buf, &bytes).map_err(|e| e.to_string())?;
     path_buf
         .to_str()
         .map(|s| Ok(Some(s.to_string())))
@@ -322,6 +354,7 @@ pub fn run() {
             open_image_dialog,
             open_document_dialog,
             save_image,
+            save_pdf,
             save_images_batch,
             load_image_from_path,
             load_document_from_path,
@@ -351,17 +384,23 @@ pub fn run() {
                     .build()?
             };
 
-            // File submenu (Open, Save, Save As, Share)
+            // File submenu (Open, Save, Save As, Share, Export as PDF/PNG)
             let open_item = MenuItem::with_id(app, "open", "Open", true, Some("CmdOrCtrl+O"))?;
             let save_item = MenuItem::with_id(app, "save", "Save", true, Some("CmdOrCtrl+S"))?;
             let save_as_item =
                 MenuItem::with_id(app, "saveAs", "Save As…", true, Some("CmdOrCtrl+Shift+S"))?;
             let share_item = MenuItem::with_id(app, "share", "Share", true, None::<&str>)?;
+            let export_pdf_item =
+                MenuItem::with_id(app, "exportPdf", "Export as PDF…", true, None::<&str>)?;
+            let export_png_item =
+                MenuItem::with_id(app, "exportPng", "Export as PNG…", true, None::<&str>)?;
             let file_menu = SubmenuBuilder::new(app, "File")
                 .item(&open_item)
                 .item(&save_item)
                 .item(&save_as_item)
                 .item(&share_item)
+                .item(&export_pdf_item)
+                .item(&export_png_item)
                 .build()?;
 
             // Edit submenu (Copy with Cmd/Ctrl+C)
@@ -401,8 +440,21 @@ pub fn run() {
                 b.build()?
             };
 
+            // Help submenu (About, Help, Contact)
+            let help_about_item =
+                MenuItem::with_id(app, "helpAbout", "About Redactorizer", true, None::<&str>)?;
+            let help_help_item =
+                MenuItem::with_id(app, "helpHelp", "Help", true, Some("CmdOrCtrl+?"))?;
+            let help_contact_item =
+                MenuItem::with_id(app, "helpContact", "Contact", true, None::<&str>)?;
+            let help_menu = SubmenuBuilder::new(app, "Help")
+                .item(&help_about_item)
+                .item(&help_help_item)
+                .item(&help_contact_item)
+                .build()?;
+
             let menu = MenuBuilder::new(app)
-                .items(&[&app_menu, &file_menu, &edit_menu, &view_menu])
+                .items(&[&app_menu, &file_menu, &edit_menu, &view_menu, &help_menu])
                 .build()?;
             app.set_menu(menu)?;
             #[cfg(not(target_os = "macos"))]
@@ -422,7 +474,13 @@ pub fn run() {
                         }
                     }
                 }
-                let _ = app_handle.emit("menu-action", id);
+                if id == "helpContact" {
+                    let _ = app_handle.opener().open_url("https://redactorizer.com/contact", None::<&str>);
+                } else if id == "helpHelp" {
+                    let _ = app_handle.opener().open_url("https://redactorizer.com/docs", None::<&str>);
+                } else {
+                    let _ = app_handle.emit("menu-action", id);
+                }
             });
             Ok(())
         })
