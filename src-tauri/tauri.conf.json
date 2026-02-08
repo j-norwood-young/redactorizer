@@ -1,1 +1,39 @@
-{"$schema":"https://schema.tauri.app/config/2","productName":"Redactorizer","version":"0.1.0","identifier":"com.tenlayer.redactorizer","build":{"beforeDevCommand":"pnpm dev","devUrl":"http://localhost:1420","beforeBuildCommand":"pnpm build","frontendDist":"../build"},"app":{"windows":[{"title":"Redactorizer","width":1000,"height":700,"dragDropEnabled":true}],"security":{"csp":null}},"bundle":{"active":true,"targets":"all","icon":["icons/32x32.png","icons/128x128.png","icons/128x128@2x.png","icons/icon.icns","icons/icon.ico"]}}
+{
+    "$schema": "https://schema.tauri.app/config/2",
+    "productName": "Redactorizer",
+    "version": "0.1.0",
+    "identifier": "com.tenlayer.redactorizer",
+    "build": {
+        "beforeDevCommand": "pnpm dev",
+        "devUrl": "http://localhost:1420",
+        "beforeBuildCommand": "pnpm build",
+        "frontendDist": "../build"
+    },
+    "app": {
+        "windows": [
+            {
+                "title": "Redactorizer",
+                "width": 1000,
+                "height": 700,
+                "dragDropEnabled": true
+            }
+        ],
+        "security": {
+            "csp": null
+        }
+    },
+    "bundle": {
+        "active": true,
+        "targets": "all",
+        "icon": [
+            "icons/32x32.png",
+            "icons/128x128.png",
+            "icons/128x128@2x.png",
+            "icons/icon.icns",
+            "icons/icon.ico"
+        ],
+        "macOS": {
+            "signingIdentity": "Developer ID Application: 10Layer Software Development Pty (Ltd) (97N553B523)"
+        }
+    }
+}
