@@ -10,9 +10,11 @@
     "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
     "check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch",
     "tauri": "tauri",
-    "tauri:build": "env-cmd -f .env -- tauri build"
+    "tauri:build": "env-cmd -f .env -- tauri build",
+    "appstore:mac": "env-cmd -f .env -- ./scripts/upload-mac-app-store.sh",
+    "appstore:mac:build": "env-cmd -f .env -- ./scripts/upload-mac-app-store.sh --build-only"
   },
-  "license": "MIT",
+  "license": "GPL-3.0-or-later",
   "dependencies": {
     "@lucide/svelte": "^0.563.0",
     "@tauri-apps/api": "^2",
