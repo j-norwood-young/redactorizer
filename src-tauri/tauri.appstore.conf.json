@@ -1,6 +1,7 @@
 {
   "bundle": {
     "macOS": {
+      "entitlements": "./Entitlements.plist",
       "minimumSystemVersion": "12.0",
       "signingIdentity": "3rd Party Mac Developer Application: 10Layer Software Development Pty (Ltd) (97N553B523)",
       "files": {
