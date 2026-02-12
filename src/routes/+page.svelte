@@ -1592,15 +1592,15 @@
     justify-content: center;
   }
   .canvas-wrap-inner {
-    display: flex;
-    align-items: center;
-    justify-content: center;
+    /* Block wrapper that grows to zoomed content size so scroll area includes full document. */
+    display: block;
     min-width: 100%;
     min-height: 100%;
+    width: max-content;
+    height: max-content;
   }
   .zoom-inner {
     position: relative;
-    flex-shrink: 0;
     margin: auto;
   }
   .toolbar-spacer {
